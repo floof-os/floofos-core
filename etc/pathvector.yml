@@ -1,0 +1,191 @@
+#---------------------------------------------------------------------------------#
+# FloofOS Routing BGP BIRD2 Template
+# Configure this file before you want to use BGP routing
+#
+# CONFIGURATION STEPS:
+# 1. Replace all 65000 with your ASN
+# 2. Set router-id to your primary IPv4 (e.g., "10.0.0.1")
+# 3. Add your prefixes (uncomment and edit 'prefixes:' section)
+# 4. Configure peers (uncomment peer templates and fill in details)
+# 5. Optional: Add PeeringDB API key for auto-discovery (set read-only)
+# 6. Save file (Ctrl+X, Y, Enter)
+# 7. Apply changes: Run 'commit' command in FloofOS CLI
+# 8. If needed: UNCOMMENT global-config section and set your gateway IP for default route to use traceroute
+#---------------------------------------------------------------------------------#
+
+asn: 65000
+bgpq-args: "-S AFRINIC,APNIC,ARIN,LACNIC,RIPE"
+default-route: false
+
+###UNCOMMENT if you want accept default route from BGP###
+#accept-default: true
+
+#irr-query-timeout: 30
+#irr-server: "rr.ntt.net"
+merge-paths: true
+#peeringdb-api-key: "api-key-from-peeringdb"
+#peeringdb-query-timeout: 30
+
+###UNCOMMENT and use as needed###
+#local-communities:
+#  - 65000:1:4
+#prefixes:
+#  - "your-prefix-ipv4/ipv6-to-be-announce"
+#  - "your-prefix-ipv4/ipv6-to-be-announce"
+router-id: "127.0.0.1"
+rtr-server: "172.65.0.2:8282"
+#rtr-server: "routinator.accuristechnologies.ca:3323"
+
+kernel:
+  learn: true
+
+### NOTE: BGP Large Communities (BGP LC)
+### 65000:1:1 - Learned from upstream
+### 65000:1:2 - Learned from route server
+### 65000:1:3 - Learned from peer
+### 65000:1:4 - Learned from downstream
+### 65000:1:5 - Learned from iBGP
+### Don't UNCOMMENT this section, this is only for your information about yout BGP Large Community
+
+
+### Default route for traceroute (optional)
+### Uncomment and set your gateway IP. Preference 80 = lower priority than BGP routes.
+
+#global-config: |
+#  protocol static default_route_ipv4 {
+#    ipv4 {
+#      preference 80;
+#    };
+#    route 0.0.0.0/0 via <your gateway>;
+#  }
+#
+#  protocol static default_route_ipv6 {
+#    ipv6 {
+#      preference 80;
+#    };
+#    route ::/0 via <your gateway>;
+#  }
+
+###Change all ASN 65000 in templates attributes and adjust them to your ASN##
+templates:
+  upstream:
+    add-on-import:
+      - 65000:1:1
+    allow-local-as: true
+    announce:
+      - 65000:1:4
+    local-pref: 100
+    remove-all-communities: 65000
+    import-limit6: 300000
+
+  routeserver:
+    add-on-import:
+      - 65000:1:2
+    announce:
+      - 65000:1:4
+    auto-import-limits: true
+    enforce-first-as: false
+    enforce-peer-nexthop: false
+    filter-transit-asns: true
+    local-pref: 200
+    remove-all-communities: 65000
+
+  peer:
+    add-on-import:
+      - 65000:1:3
+    announce:
+      - 65000:1:4
+    auto-as-set: true
+    auto-import-limits: true
+    filter-irr: true
+    filter-transit-asns: true
+    irr-accept-child-prefixes: true
+    local-pref: 300
+    remove-all-communities: 65000
+
+  downstream:
+    add-on-import:
+      - 65000:1:4
+    allow-blackhole-community: true
+    announce:
+      - 65000:1:1
+      - 65000:1:2
+      - 65000:1:3
+    auto-as-set: true
+    auto-import-limits: true
+    filter-irr: true
+    filter-transit-asns: true
+    irr-accept-child-prefixes: true
+    local-pref: 400
+    remove-all-communities: 65000
+
+  ibgp:
+    allow-local-as: true
+    asn: 65000
+    add-on-import:
+      - 65000:1:5
+    announce:
+      - 65000:1:1
+      - 65000:1:2
+      - 65000:1:3
+      - 65000:1:4
+      - 65000:1:5
+    direct: true
+    enforce-first-as: false
+    enforce-peer-nexthop: false
+    filter-irr: false
+    filter-rpki: false
+    next-hop-self: true
+    remove-all-communities: 65000
+
+
+###Peers template (use as needed) and UNCOMMENT if you want to use it###
+
+#peers:
+###--> user for peering to your upstream/IP Transit###
+#  upstream_name:
+#    asn: neigh_asn
+#    disabled: false
+#    listen6: "<local_address>"
+#    local-pref: 100
+#    neighbors:
+#      - "<neigh_address>"
+#    template: upstream
+
+####--> use for peering to RouteSever, e.g IXP###
+#  routeserver_name:
+#    asn: neigh_asn
+#    disabled: false
+#    listen4: "<local_address>"
+#    listen6: "<local_address>"
+#    local-pref: 200
+#    neighbors:
+#      - "<neigh_address>"
+#      - "<neigh_address>"
+#    template: routeserver
+
+
+####--> use for Bilateral Peering or your downstream###
+#  peering_name:
+#    asn: neigh_asn
+#    disabled: false
+#    listen6: "<local_address>"
+#    local-pref: 300
+#    neighbors:
+#      - "<neigh_address>"
+#    template: peer
+
+####--> use fror iBGP/internal AS###
+#  ibgp_name:
+#    add-on-import:
+#      - <your_asn>:1:1
+#    announce:
+#      - <your_asn>:1:1
+#    disabled: false
+#    listen6: "<local_address>"
+#    local-port: 179
+#    local-pref: 150
+#    neighbor-port: 179
+#    neighbors:
+#      - "<neigh_address>"
+#    template: ibgp

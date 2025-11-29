@@ -1,0 +1,4 @@
+set logging class linux-cp rate-limit 1000 level warn syslog-level notice
+lcp default netns dataplane
+lcp lcp-sync on
+lcp lcp-auto-subint on

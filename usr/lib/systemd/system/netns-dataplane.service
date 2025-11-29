@@ -1,0 +1,20 @@
+[Unit]
+Description=Dataplane network namespace
+After=systemd-sysctl.service network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+PrivateNetwork=yes
+ExecStart=-/usr/sbin/ip netns delete dataplane
+ExecStart=-/usr/bin/mkdir -p /etc/netns/dataplane
+ExecStart=-/usr/bin/touch /etc/netns/dataplane/resolv.conf
+ExecStart=-/usr/sbin/ip netns add dataplane
+ExecStart=-/usr/bin/umount /var/run/netns/dataplane
+ExecStart=-/usr/bin/mount --bind /proc/self/ns/net /var/run/netns/dataplane
+ExecStart=-/usr/sbin/ip netns exec dataplane /usr/lib/systemd/systemd-sysctl
+ExecStop=-/usr/sbin/ip netns delete dataplane
+
+[Install]
+WantedBy=multi-user.target

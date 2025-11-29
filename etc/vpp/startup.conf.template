@@ -1,0 +1,45 @@
+unix {
+  nodaemon
+  log /var/log/vpp/vpp.log
+  full-coredump
+  cli-listen /run/vpp/cli.sock
+  gid vpp
+  interactive
+  poll-sleep-usec 100
+  exec /etc/vpp/config/bootstrap.vpp
+  coredump-size unlimited
+}
+
+api-trace {
+  on
+  nitems 5000
+}
+
+socksvr {
+  default
+}
+
+dpdk {
+  uio-driver vfio-pci 
+  no-multi-seg
+  no-tx-checksum-offload
+}
+
+linux-cp {
+  default netns dataplane
+  lcp-sync
+  lcp-auto-subint
+}
+
+logging {
+  default-log-level info
+  default-syslog-log-level notice
+}
+
+plugins {
+  plugin dpdk_plugin.so { enable }
+  plugin linux_cp_plugin.so { enable }
+  plugin linux_nl_plugin.so { enable }
+  plugin perfmon_plugin.so { disable }
+  plugin unittest_plugin.so { disable }
+}

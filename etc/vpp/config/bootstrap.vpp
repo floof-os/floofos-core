@@ -1,0 +1,3 @@
+exec /etc/vpp/config/head.vpp
+exec /etc/vpp/config/vppcfg.vpp
+exec /etc/vpp/config/tail.vpp

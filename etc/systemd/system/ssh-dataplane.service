@@ -1,0 +1,14 @@
+[Unit]
+Description=SSH Server (Dataplane Namespace)
+After=network.target netns-dataplane.service
+Requires=netns-dataplane.service
+
+[Service]
+ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/sshd -D -oPidFile=/run/sshd-dataplane.pid
+KillMode=process
+Type=forking
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

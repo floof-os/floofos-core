@@ -1,0 +1,16 @@
+[Unit]
+Description=BIRD Internet Routing Daemon (Dataplane Namespace)
+After=network.target netns-dataplane.service vpp.service
+Requires=netns-dataplane.service
+
+[Service]
+EnvironmentFile=-/etc/bird/envvars
+ExecStartPre=-/usr/lib/bird/prepare-environment
+ExecStartPre=/usr/sbin/ip netns exec dataplane /usr/sbin/bird -p
+ExecReload=/usr/sbin/ip netns exec dataplane /usr/sbin/birdc configure
+ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/bird -f -u ${BIRD_RUN_USER:-bird} -g ${BIRD_RUN_GROUP:-bird} ${BIRD_ARGS}
+Restart=on-abort
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

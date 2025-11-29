@@ -1,0 +1,3 @@
+#!/bin/bash
+# FloofOS CLI Wrapper - Auto-execute in dataplane namespace
+exec ip netns exec dataplane /usr/local/bin/cli-real "$@"

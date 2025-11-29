@@ -1,0 +1,4 @@
+# VPP SNMP Agent Configuration
+polling_interval: 30
+vpp_socket: /run/vpp/cli.sock
+vppcfg_path: /etc/vpp/dataplane.yaml

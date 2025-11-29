@@ -1,0 +1,11 @@
+[Unit]
+Description=VPP Auto Configuration
+Before=vpp.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vpp-auto-config.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
