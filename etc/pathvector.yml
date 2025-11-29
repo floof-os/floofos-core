@@ -1,4 +1,3 @@
-#---------------------------------------------------------------------------------#
 # FloofOS Routing BGP BIRD2 Template
 # Configure this file before you want to use BGP routing
 #
@@ -8,10 +7,10 @@
 # 3. Add your prefixes (uncomment and edit 'prefixes:' section)
 # 4. Configure peers (uncomment peer templates and fill in details)
 # 5. Optional: Add PeeringDB API key for auto-discovery (set read-only)
-# 6. Save file (Ctrl+X, Y, Enter)
+# 6. Save file (Ctrl+Q, y)
 # 7. Apply changes: Run 'commit' command in FloofOS CLI
 # 8. If needed: UNCOMMENT global-config section and set your gateway IP for default route to use traceroute
-#---------------------------------------------------------------------------------#
+
 
 asn: 65000
 bgpq-args: "-S AFRINIC,APNIC,ARIN,LACNIC,RIPE"
