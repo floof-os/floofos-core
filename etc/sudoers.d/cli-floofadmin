@@ -5,7 +5,7 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License.
 
-floofadmin ALL=(ALL) NOPASSWD: /usr/local/bin/cli
-floofadmin ALL=(ALL) NOPASSWD: /usr/sbin/vppctl
-floofadmin ALL=(ALL) NOPASSWD: /usr/sbin/ip netns exec dataplane /usr/sbin/birdc
-floofadmin ALL=(ALL) NOPASSWD: /etc/vppcfg/.venv/bin/vppcfg
+floofos ALL=(ALL) NOPASSWD: /usr/local/bin/cli
+floofos ALL=(ALL) NOPASSWD: /usr/sbin/vppctl
+floofos ALL=(ALL) NOPASSWD: /usr/sbin/ip netns exec dataplane /usr/sbin/birdc
+floofos ALL=(ALL) NOPASSWD: /etc/vppcfg/.venv/bin/vppcfg
