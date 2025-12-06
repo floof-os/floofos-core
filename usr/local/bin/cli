@@ -7,5 +7,18 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License.
 
-# FloofOS CLI Wrapper - Auto-execute in dataplane namespace
-exec ip netns exec dataplane /usr/bin/floof-cli "$@"
+MAX_WAIT=30
+WAITED=0
+
+while [ ! -f /var/run/netns/dataplane ] && [ $WAITED -lt $MAX_WAIT ]; do
+    sleep 1
+    WAITED=$((WAITED + 1))
+done
+
+if [ -f /var/run/netns/dataplane ]; then
+    ip netns exec dataplane /usr/bin/floof-cli "$@"
+else
+    echo "Error: dataplane namespace not ready after ${MAX_WAIT}s"
+    echo "Check: systemctl status netns-dataplane"
+    exit 1
+fi

@@ -1,12 +1,5 @@
 #!/bin/bash
 
-# FloofOS - Fast Line-rate Offload On Fabric Operating System
-# Copyright (C) 2025 FloofOS Networks <dev@floofos.io>
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License.
-
 TEMPLATE="/etc/vpp/startup.conf.template"
 CONF="/etc/vpp/startup.conf"
 
@@ -227,6 +220,7 @@ vm.nr_hugepages=$NR_HUGEPAGES
 vm.max_map_count=$VM_MAX_MAP_COUNT
 vm.hugetlb_shm_group=0
 kernel.shmmax=$KERNEL_SHMMAX
+
 kernel.mm.transparent_hugepage.enabled=never
 EOFSYSCTL
 
@@ -235,6 +229,7 @@ net.core.rmem_default=$NETLINK_MEM
 net.core.wmem_default=$NETLINK_MEM
 net.core.rmem_max=$((NETLINK_MEM * 2))
 net.core.wmem_max=$((NETLINK_MEM * 2))
+
 net.core.netdev_max_backlog=5000
 net.core.netdev_budget=600
 EOFNETLINK
@@ -348,21 +343,6 @@ if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" 
   sed -i "/^logging {/i\\
 nat {\\n  endpoint-dependent\\n  max translations per thread 1048576\\n}\\n\\nsession {\\n  evt_qs_memfd_seg\\n  event-queue-length 16384\\n  preallocated-sessions 1024\\n  v4-session-table-buckets 20000\\n  v4-session-table-memory 64M\\n  v6-session-table-buckets 20000\\n  v6-session-table-memory 64M\\n}\\n\\nacl-plugin {\\n  use tuple merge 1\\n  hash lookup heap size 512M\\n}\\n" "$CONF"
 fi
-
-case "$DEPLOYMENT_PROFILE" in
-  micro)
-    ;;
-  minimal)
-    ;;
-  small)
-    ;;
-  medium)
-    ;;
-  large)
-    ;;
-  extreme)
-    ;;
-esac
 
 if [ "$DEPLOYMENT_PROFILE" != "micro" ] && [ "$DEPLOYMENT_PROFILE" != "minimal" ]; then
   

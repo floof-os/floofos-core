@@ -1,0 +1,11 @@
+PRETTY_NAME="FloofOS 1.0"
+NAME="FloofOS"
+VERSION_ID="1.0"
+VERSION="1.0"
+VERSION_CODENAME=autumn
+ID=floofos
+ID_LIKE=debian
+HOME_URL="https://floofos.io"
+SUPPORT_URL="https://github.com/floof-os"
+BUG_REPORT_URL="https://github.com/floof-os/floofos-build/issues"
+

@@ -12,7 +12,7 @@ Requires=snmpd.service vpp.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/vpp-snmp-agent -config /etc/vpp-snmp-agent/config.yaml
+ExecStart=/usr/local/bin/vpp-snmp-agent -config /etc/vpp-snmp-agent/config.yaml
 Restart=always
 RestartSec=5
 User=root
