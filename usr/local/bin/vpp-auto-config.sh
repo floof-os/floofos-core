@@ -1,5 +1,8 @@
 #!/bin/bash
 
+LOG="/var/log/vpp/auto-config.log"
+exec > >(tee -a "$LOG") 2>&1
+
 TEMPLATE="/etc/vpp/startup.conf.template"
 CONF="/etc/vpp/startup.conf"
 
@@ -17,26 +20,31 @@ HAS_AVX512=$(grep -o 'avx512' /proc/cpuinfo | head -1)
 
 IS_VM=0
 if grep -qE 'hypervisor|VMware|VirtualBox|QEMU|Xen' /proc/cpuinfo 2>/dev/null || \
-   dmidecode -s system-product-name 2>/dev/null | grep -qiE 'virtual|vmware|virtualbox|qemu|xen|kvm'; then
+   dmidecode -s system-product-name 2>/dev/null | grep -qiE 'virtual|vmware|virtualbox|qemu|xen|kvm|proxmox'; then
     IS_VM=1
 fi
 
-PCI_DEVICES=$(lspci -D | grep -E 'Ethernet|Network' | awk '{print $1}')
+PCI_DEVICES=""
+for dev in /sys/class/net/*/device; do
+    [ -L "$dev" ] || continue
+    IFACE=$(basename $(dirname $dev))
+    [ "$IFACE" = "lo" ] && continue
+    PCI=$(basename $(readlink -f $dev))
+    [ -n "$PCI" ] && PCI_DEVICES="$PCI_DEVICES $PCI"
+done
+PCI_DEVICES=$(echo $PCI_DEVICES | tr ' ' '\n' | sort -u | tr '\n' ' ')
 NIC_COUNT=$(echo "$PCI_DEVICES" | wc -w)
 
-DPDK_SUPPORTED=1
-for PCI in $PCI_DEVICES; do
-    NIC_INFO=$(lspci -s $PCI 2>/dev/null)
-    if echo "$NIC_INFO" | grep -qiE 'Intel.*82540|Intel.*82545|Intel.*PRO/1000'; then
-        DPDK_SUPPORTED=0
-    fi
-done
+[ $NIC_COUNT -eq 0 ] && {
+    PCI_DEVICES=$(lspci -D | grep -E 'Ethernet|Network' | awk '{print $1}')
+    NIC_COUNT=$(echo "$PCI_DEVICES" | wc -w)
+}
 
 declare -A NIC_SPEEDS
 MAX_NIC_SPEED=0
 
 for PCI in $PCI_DEVICES; do
-  NIC_NAME=$(lspci -s $PCI | grep -oP '(10G|25G|40G|50G|100G|200G|400G)')
+    NIC_NAME=$(lspci -s $PCI 2>/dev/null | grep -oP '(10G|25G|40G|50G|100G|200G|400G)')
   
   case "$NIC_NAME" in
     *400G*) SPEED=400000 ;;
@@ -204,7 +212,6 @@ NR_HUGEPAGES=$((TOTAL_HUGE_MEM_MB / 2))
 
 MAX_HUGEPAGES=$(( (FREE_RAM * 70 / 100) / 2 ))
 if [ $NR_HUGEPAGES -gt $MAX_HUGEPAGES ]; then
-  echo "         Capping to 70% of available RAM"
   NR_HUGEPAGES=$MAX_HUGEPAGES
 fi
 
@@ -234,8 +241,6 @@ vm.nr_hugepages=$NR_HUGEPAGES
 vm.max_map_count=$VM_MAX_MAP_COUNT
 vm.hugetlb_shm_group=0
 kernel.shmmax=$KERNEL_SHMMAX
-
-kernel.mm.transparent_hugepage.enabled=never
 EOFSYSCTL
 
 cat > /etc/sysctl.d/81-vpp-netlink.conf <<EOFNETLINK
@@ -243,7 +248,6 @@ net.core.rmem_default=$NETLINK_MEM
 net.core.wmem_default=$NETLINK_MEM
 net.core.rmem_max=$((NETLINK_MEM * 2))
 net.core.wmem_max=$((NETLINK_MEM * 2))
-
 net.core.netdev_max_backlog=5000
 net.core.netdev_budget=600
 EOFNETLINK
@@ -302,9 +306,9 @@ bind_to_dpdk() {
     local PCI_ADDR=$1
     local IFACE=""
     
-    if [ -d "/sys/bus/pci/devices/$PCI_ADDR/net" ]; then
-        IFACE=$(ls /sys/bus/pci/devices/$PCI_ADDR/net/ 2>/dev/null | head -1)
-    fi
+    for net in /sys/bus/pci/devices/$PCI_ADDR/net/*; do
+        [ -d "$net" ] && IFACE=$(basename "$net") && break
+    done
     
     if [ -n "$IFACE" ]; then
         ip link set "$IFACE" down 2>/dev/null || true
@@ -321,14 +325,17 @@ bind_to_dpdk() {
     
     if [ -n "$CURRENT_DRIVER" ]; then
         echo "$PCI_ADDR" > /sys/bus/pci/devices/$PCI_ADDR/driver/unbind 2>/dev/null || true
+        sleep 0.5
     fi
     
-    local VENDOR_ID=$(cat /sys/bus/pci/devices/$PCI_ADDR/vendor 2>/dev/null)
-    local DEVICE_ID=$(cat /sys/bus/pci/devices/$PCI_ADDR/device 2>/dev/null)
+    local VENDOR_ID=$(cat /sys/bus/pci/devices/$PCI_ADDR/vendor 2>/dev/null | sed 's/0x//')
+    local DEVICE_ID=$(cat /sys/bus/pci/devices/$PCI_ADDR/device 2>/dev/null | sed 's/0x//')
     
     if [ -d /sys/bus/pci/drivers/vfio-pci ]; then
         echo "$VENDOR_ID $DEVICE_ID" > /sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null || true
+        sleep 0.2
         echo "$PCI_ADDR" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || {
+            echo "$VENDOR_ID $DEVICE_ID" > /sys/bus/pci/drivers/uio_pci_generic/new_id 2>/dev/null || true
             echo "$PCI_ADDR" > /sys/bus/pci/drivers/uio_pci_generic/bind 2>/dev/null || true
         }
     else
@@ -467,9 +474,6 @@ EOFIRQSCRIPT
     chmod +x /usr/local/bin/vpp-irq-affinity.sh
     systemctl daemon-reload
     systemctl enable vpp-irq-affinity.service >/dev/null 2>&1
-    
-  else
-    :
   fi
 fi
 
@@ -496,15 +500,8 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
         update-grub >/dev/null 2>&1
         
         REBOOT_REQUIRED=1
-      else
-        :
-      fi
-    else
-      :
-    fi
-  else
-    :
-
+            fi
+        fi
   fi
 fi
 

@@ -13,6 +13,8 @@ DISK=""
 HOSTNAME="floofos"
 CONSOLE="kvm"
 PASSWORD=""
+PRESERVE_CONFIG="false"
+CONFIG_COMMIT="-1"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -30,6 +32,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --password)
             PASSWORD="$2"
+            shift 2
+            ;;
+        --preserve-config)
+            PRESERVE_CONFIG="$2"
+            shift 2
+            ;;
+        --config-commit)
+            CONFIG_COMMIT="$2"
             shift 2
             ;;
         *)
@@ -59,11 +69,11 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-echo "[1/8] Unmounting existing partitions..."
+echo "[1/9] Unmounting existing partitions..."
 umount ${DISK}* 2>/dev/null || true
 swapoff ${DISK}* 2>/dev/null || true
 
-echo "[2/8] Creating partition table..."
+echo "[2/9] Creating partition table..."
 parted -s "$DISK" mklabel gpt
 parted -s "$DISK" mkpart primary fat32 1MiB 513MiB
 parted -s "$DISK" set 1 esp on
@@ -79,23 +89,22 @@ else
     ROOT_PART="${DISK}2"
 fi
 
-echo "[3/8] Formatting partitions..."
+echo "[3/9] Formatting partitions..."
 mkfs.fat -F32 "$EFI_PART"
 mkfs.ext4 -F -L floofos-root "$ROOT_PART"
 
-echo "[4/8] Mounting target filesystem..."
+echo "[4/9] Mounting target filesystem..."
 MOUNT_DIR="/mnt/floofos-install"
 mkdir -p "$MOUNT_DIR"
 mount "$ROOT_PART" "$MOUNT_DIR"
 mkdir -p "$MOUNT_DIR/boot/efi"
 mount "$EFI_PART" "$MOUNT_DIR/boot/efi"
 
-echo "[5/8] Copying system files..."
+echo "[5/9] Copying system files..."
 rsync -aAXv --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found","/swapfile"} / "$MOUNT_DIR/" 2>/dev/null
 
-echo "[6/8] Configuring system..."
+echo "[6/9] Configuring system..."
 
-# Set hostname
 echo "$HOSTNAME" > "$MOUNT_DIR/etc/hostname"
 cat > "$MOUNT_DIR/etc/hosts" <<EOF
 127.0.0.1   localhost
@@ -106,11 +115,9 @@ ff02::1     ip6-allnodes
 ff02::2     ip6-allrouters
 EOF
 
-# Set password for floofos user
 echo "floofos:$PASSWORD" | chroot "$MOUNT_DIR" chpasswd
 echo "root:$PASSWORD" | chroot "$MOUNT_DIR" chpasswd
 
-# Generate fstab
 ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 
@@ -120,51 +127,118 @@ UUID=$ROOT_UUID   /           ext4    errors=remount-ro   0   1
 UUID=$EFI_UUID    /boot/efi   vfat    umask=0077          0   1
 EOF
 
-# Configure console
 if [ "$CONSOLE" = "serial" ]; then
     mkdir -p "$MOUNT_DIR/etc/default"
     sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8"/' "$MOUNT_DIR/etc/default/grub" 2>/dev/null || true
     sed -i 's/^GRUB_TERMINAL=.*/GRUB_TERMINAL="serial console"/' "$MOUNT_DIR/etc/default/grub" 2>/dev/null || true
 fi
 
-# Remove live-boot packages if present
 chroot "$MOUNT_DIR" apt-get remove --purge -y live-boot live-boot-initramfs-tools live-config live-config-systemd 2>/dev/null || true
 chroot "$MOUNT_DIR" apt-get autoremove -y 2>/dev/null || true
 
-# Ensure we're not booting into live mode
 rm -f "$MOUNT_DIR/etc/live" 2>/dev/null || true
 rm -rf "$MOUNT_DIR/lib/live" 2>/dev/null || true
 
-echo "[7/8] Installing bootloader..."
+if [ "$PRESERVE_CONFIG" = "true" ]; then
+    echo "[7/9] Preserving configuration..."
+    
+    mkdir -p "$MOUNT_DIR/etc/floofos-config/commits"
+    mkdir -p "$MOUNT_DIR/etc/floofos-config/backups"
+    mkdir -p "$MOUNT_DIR/etc/vpp/config"
+    mkdir -p "$MOUNT_DIR/etc/nftables.d"
+    
+    if [ -d /etc/floofos-config ]; then
+        cp -a /etc/floofos-config/. "$MOUNT_DIR/etc/floofos-config/"
+    fi
+    
+    if [ "$CONFIG_COMMIT" != "-1" ] && [ -d "/etc/floofos-config/commits/$CONFIG_COMMIT" ]; then
+        COMMIT_DIR="/etc/floofos-config/commits/$CONFIG_COMMIT"
+        
+        [ -f "$COMMIT_DIR/pathvector.yml" ] && cp "$COMMIT_DIR/pathvector.yml" "$MOUNT_DIR/etc/pathvector.yml"
+        [ -f "$COMMIT_DIR/head.vpp" ] && cp "$COMMIT_DIR/head.vpp" "$MOUNT_DIR/etc/vpp/config/head.vpp"
+        [ -f "$COMMIT_DIR/vppcfg.vpp" ] && cp "$COMMIT_DIR/vppcfg.vpp" "$MOUNT_DIR/etc/vpp/config/vppcfg.vpp"
+        [ -f "$COMMIT_DIR/tail.vpp" ] && cp "$COMMIT_DIR/tail.vpp" "$MOUNT_DIR/etc/vpp/config/tail.vpp"
+        [ -f "$COMMIT_DIR/dataplane.yaml" ] && cp "$COMMIT_DIR/dataplane.yaml" "$MOUNT_DIR/etc/vpp/dataplane.yaml"
+    else
+        [ -f /etc/pathvector.yml ] && cp /etc/pathvector.yml "$MOUNT_DIR/etc/pathvector.yml"
+        [ -f /etc/vpp/config/head.vpp ] && cp /etc/vpp/config/head.vpp "$MOUNT_DIR/etc/vpp/config/head.vpp"
+        [ -f /etc/vpp/config/vppcfg.vpp ] && cp /etc/vpp/config/vppcfg.vpp "$MOUNT_DIR/etc/vpp/config/vppcfg.vpp"
+        [ -f /etc/vpp/config/tail.vpp ] && cp /etc/vpp/config/tail.vpp "$MOUNT_DIR/etc/vpp/config/tail.vpp"
+        [ -f /etc/vpp/dataplane.yaml ] && cp /etc/vpp/dataplane.yaml "$MOUNT_DIR/etc/vpp/dataplane.yaml"
+    fi
+    
+    [ -d /etc/nftables.d ] && cp -a /etc/nftables.d/. "$MOUNT_DIR/etc/nftables.d/"
+    [ -f /etc/floofctl/users.json ] && cp /etc/floofctl/users.json "$MOUNT_DIR/etc/floofctl/users.json"
+    
+    cat > "$MOUNT_DIR/etc/systemd/system/floofos-config-restore.service" <<'EOFSERVICE'
+[Unit]
+Description=FloofOS Configuration Restore
+After=vpp.service bird-dataplane.service
+Wants=vpp.service
 
-# Bind mount for chroot
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/floofos-config-restore.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOFSERVICE
+
+    cat > "$MOUNT_DIR/usr/local/bin/floofos-config-restore.sh" <<'EOFRESTORE'
+#!/bin/bash
+LOG="/var/log/floofos-config-restore.log"
+exec > >(tee -a "$LOG") 2>&1
+
+sleep 5
+
+if [ -f /etc/vpp/config/vppcfg.vpp ]; then
+    vppctl exec /etc/vpp/config/vppcfg.vpp 2>/dev/null || true
+fi
+
+if [ -f /etc/pathvector.yml ]; then
+    pathvector generate 2>/dev/null || true
+    sleep 2
+    ip netns exec dataplane birdc configure 2>/dev/null || true
+fi
+
+systemctl disable floofos-config-restore.service 2>/dev/null || true
+rm -f /etc/systemd/system/floofos-config-restore.service 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+
+exit 0
+EOFRESTORE
+
+    chmod +x "$MOUNT_DIR/usr/local/bin/floofos-config-restore.sh"
+    chroot "$MOUNT_DIR" systemctl enable floofos-config-restore.service 2>/dev/null || true
+else
+    echo "[7/9] Skipping configuration preservation..."
+fi
+
+echo "[8/9] Installing bootloader..."
+
 mount --bind /dev "$MOUNT_DIR/dev"
 mount --bind /dev/pts "$MOUNT_DIR/dev/pts"
 mount --bind /proc "$MOUNT_DIR/proc"
 mount --bind /sys "$MOUNT_DIR/sys"
 
-# Install GRUB
 chroot "$MOUNT_DIR" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=FloofOS --recheck 2>/dev/null || \
 chroot "$MOUNT_DIR" grub-install --target=i386-pc "$DISK" 2>/dev/null || true
 
 chroot "$MOUNT_DIR" update-grub
 
-# Update initramfs
 chroot "$MOUNT_DIR" update-initramfs -u -k all
 
-echo "[8/8] Cleaning up..."
+echo "[9/9] Cleaning up..."
 
-# Unmount bind mounts
 umount "$MOUNT_DIR/sys" 2>/dev/null || true
 umount "$MOUNT_DIR/proc" 2>/dev/null || true
 umount "$MOUNT_DIR/dev/pts" 2>/dev/null || true
 umount "$MOUNT_DIR/dev" 2>/dev/null || true
 
-# Sync and unmount
 sync
 umount "$MOUNT_DIR/boot/efi"
 umount "$MOUNT_DIR"
 
 echo ""
 echo "Installation completed successfully!"
-

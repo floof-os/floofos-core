@@ -1,0 +1,15 @@
+[Unit]
+Description=FloofOS DPDK Interface Binding
+DefaultDependencies=no
+Before=network-pre.target systemd-networkd.service NetworkManager.service
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/vpp-dpdk-bind.sh
+
+[Install]
+WantedBy=sysinit.target
+

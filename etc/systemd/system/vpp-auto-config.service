@@ -7,6 +7,8 @@
 
 [Unit]
 Description=VPP Auto Configuration
+After=vpp-dpdk-bind.service netns-dataplane.service
+Requires=vpp-dpdk-bind.service
 Before=vpp.service
 
 [Service]
