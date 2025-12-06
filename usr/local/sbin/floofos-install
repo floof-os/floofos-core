@@ -1,0 +1,170 @@
+#!/bin/bash
+
+# FloofOS - Fast Line-rate Offload On Fabric Operating System
+# Copyright (C) 2025 FloofOS Networks <dev@floofos.io>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License.
+
+set -e
+
+DISK=""
+HOSTNAME="floofos"
+CONSOLE="kvm"
+PASSWORD=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --disk)
+            DISK="$2"
+            shift 2
+            ;;
+        --hostname)
+            HOSTNAME="$2"
+            shift 2
+            ;;
+        --console)
+            CONSOLE="$2"
+            shift 2
+            ;;
+        --password)
+            PASSWORD="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$DISK" ]; then
+    echo "Error: No target disk specified"
+    exit 1
+fi
+
+if [ -z "$PASSWORD" ]; then
+    echo "Error: No password specified"
+    exit 1
+fi
+
+if [ ! -b "$DISK" ]; then
+    echo "Error: $DISK is not a valid block device"
+    exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: This script must be run as root"
+    exit 1
+fi
+
+echo "[1/8] Unmounting existing partitions..."
+umount ${DISK}* 2>/dev/null || true
+swapoff ${DISK}* 2>/dev/null || true
+
+echo "[2/8] Creating partition table..."
+parted -s "$DISK" mklabel gpt
+parted -s "$DISK" mkpart primary fat32 1MiB 513MiB
+parted -s "$DISK" set 1 esp on
+parted -s "$DISK" mkpart primary ext4 513MiB 100%
+
+sleep 2
+
+if [[ "$DISK" == *"nvme"* ]]; then
+    EFI_PART="${DISK}p1"
+    ROOT_PART="${DISK}p2"
+else
+    EFI_PART="${DISK}1"
+    ROOT_PART="${DISK}2"
+fi
+
+echo "[3/8] Formatting partitions..."
+mkfs.fat -F32 "$EFI_PART"
+mkfs.ext4 -F -L floofos-root "$ROOT_PART"
+
+echo "[4/8] Mounting target filesystem..."
+MOUNT_DIR="/mnt/floofos-install"
+mkdir -p "$MOUNT_DIR"
+mount "$ROOT_PART" "$MOUNT_DIR"
+mkdir -p "$MOUNT_DIR/boot/efi"
+mount "$EFI_PART" "$MOUNT_DIR/boot/efi"
+
+echo "[5/8] Copying system files..."
+rsync -aAXv --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found","/swapfile"} / "$MOUNT_DIR/" 2>/dev/null
+
+echo "[6/8] Configuring system..."
+
+# Set hostname
+echo "$HOSTNAME" > "$MOUNT_DIR/etc/hostname"
+cat > "$MOUNT_DIR/etc/hosts" <<EOF
+127.0.0.1   localhost
+127.0.1.1   $HOSTNAME
+
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+EOF
+
+# Set password for floofos user
+echo "floofos:$PASSWORD" | chroot "$MOUNT_DIR" chpasswd
+echo "root:$PASSWORD" | chroot "$MOUNT_DIR" chpasswd
+
+# Generate fstab
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
+
+cat > "$MOUNT_DIR/etc/fstab" <<EOF
+# FloofOS filesystem table
+UUID=$ROOT_UUID   /           ext4    errors=remount-ro   0   1
+UUID=$EFI_UUID    /boot/efi   vfat    umask=0077          0   1
+EOF
+
+# Configure console
+if [ "$CONSOLE" = "serial" ]; then
+    mkdir -p "$MOUNT_DIR/etc/default"
+    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="console=ttyS0,115200n8"/' "$MOUNT_DIR/etc/default/grub" 2>/dev/null || true
+    sed -i 's/^GRUB_TERMINAL=.*/GRUB_TERMINAL="serial console"/' "$MOUNT_DIR/etc/default/grub" 2>/dev/null || true
+fi
+
+# Remove live-boot packages if present
+chroot "$MOUNT_DIR" apt-get remove --purge -y live-boot live-boot-initramfs-tools live-config live-config-systemd 2>/dev/null || true
+chroot "$MOUNT_DIR" apt-get autoremove -y 2>/dev/null || true
+
+# Ensure we're not booting into live mode
+rm -f "$MOUNT_DIR/etc/live" 2>/dev/null || true
+rm -rf "$MOUNT_DIR/lib/live" 2>/dev/null || true
+
+echo "[7/8] Installing bootloader..."
+
+# Bind mount for chroot
+mount --bind /dev "$MOUNT_DIR/dev"
+mount --bind /dev/pts "$MOUNT_DIR/dev/pts"
+mount --bind /proc "$MOUNT_DIR/proc"
+mount --bind /sys "$MOUNT_DIR/sys"
+
+# Install GRUB
+chroot "$MOUNT_DIR" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=FloofOS --recheck 2>/dev/null || \
+chroot "$MOUNT_DIR" grub-install --target=i386-pc "$DISK" 2>/dev/null || true
+
+chroot "$MOUNT_DIR" update-grub
+
+# Update initramfs
+chroot "$MOUNT_DIR" update-initramfs -u -k all
+
+echo "[8/8] Cleaning up..."
+
+# Unmount bind mounts
+umount "$MOUNT_DIR/sys" 2>/dev/null || true
+umount "$MOUNT_DIR/proc" 2>/dev/null || true
+umount "$MOUNT_DIR/dev/pts" 2>/dev/null || true
+umount "$MOUNT_DIR/dev" 2>/dev/null || true
+
+# Sync and unmount
+sync
+umount "$MOUNT_DIR/boot/efi"
+umount "$MOUNT_DIR"
+
+echo ""
+echo "Installation completed successfully!"
+

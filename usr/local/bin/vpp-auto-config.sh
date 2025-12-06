@@ -15,8 +15,22 @@ CPU_MODEL=$(lscpu | grep "Model name:" | cut -d':' -f2 | xargs)
 HAS_AVX512=$(grep -o 'avx512' /proc/cpuinfo | head -1)
 [ -n "$HAS_AVX512" ] && CPU_FEATURES="AVX-512" || CPU_FEATURES="AVX2"
 
+IS_VM=0
+if grep -qE 'hypervisor|VMware|VirtualBox|QEMU|Xen' /proc/cpuinfo 2>/dev/null || \
+   dmidecode -s system-product-name 2>/dev/null | grep -qiE 'virtual|vmware|virtualbox|qemu|xen|kvm'; then
+    IS_VM=1
+fi
+
 PCI_DEVICES=$(lspci -D | grep -E 'Ethernet|Network' | awk '{print $1}')
 NIC_COUNT=$(echo "$PCI_DEVICES" | wc -w)
+
+DPDK_SUPPORTED=1
+for PCI in $PCI_DEVICES; do
+    NIC_INFO=$(lspci -s $PCI 2>/dev/null)
+    if echo "$NIC_INFO" | grep -qiE 'Intel.*82540|Intel.*82545|Intel.*PRO/1000'; then
+        DPDK_SUPPORTED=0
+    fi
+done
 
 declare -A NIC_SPEEDS
 MAX_NIC_SPEED=0
@@ -277,6 +291,56 @@ fi
 
 RSS_QUEUES=$RX_QUEUES_PER_NIC
 
+modprobe vfio-pci 2>/dev/null || true
+modprobe uio_pci_generic 2>/dev/null || true
+
+if [ -d /sys/module/vfio ]; then
+    echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode 2>/dev/null || true
+fi
+
+bind_to_dpdk() {
+    local PCI_ADDR=$1
+    local IFACE=""
+    
+    if [ -d "/sys/bus/pci/devices/$PCI_ADDR/net" ]; then
+        IFACE=$(ls /sys/bus/pci/devices/$PCI_ADDR/net/ 2>/dev/null | head -1)
+    fi
+    
+    if [ -n "$IFACE" ]; then
+        ip link set "$IFACE" down 2>/dev/null || true
+    fi
+    
+    local CURRENT_DRIVER=""
+    if [ -L "/sys/bus/pci/devices/$PCI_ADDR/driver" ]; then
+        CURRENT_DRIVER=$(basename $(readlink /sys/bus/pci/devices/$PCI_ADDR/driver))
+    fi
+    
+    if [ "$CURRENT_DRIVER" = "vfio-pci" ] || [ "$CURRENT_DRIVER" = "uio_pci_generic" ]; then
+        return 0
+    fi
+    
+    if [ -n "$CURRENT_DRIVER" ]; then
+        echo "$PCI_ADDR" > /sys/bus/pci/devices/$PCI_ADDR/driver/unbind 2>/dev/null || true
+    fi
+    
+    local VENDOR_ID=$(cat /sys/bus/pci/devices/$PCI_ADDR/vendor 2>/dev/null)
+    local DEVICE_ID=$(cat /sys/bus/pci/devices/$PCI_ADDR/device 2>/dev/null)
+    
+    if [ -d /sys/bus/pci/drivers/vfio-pci ]; then
+        echo "$VENDOR_ID $DEVICE_ID" > /sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null || true
+        echo "$PCI_ADDR" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || {
+            echo "$PCI_ADDR" > /sys/bus/pci/drivers/uio_pci_generic/bind 2>/dev/null || true
+        }
+    else
+        echo "$VENDOR_ID $DEVICE_ID" > /sys/bus/pci/drivers/uio_pci_generic/new_id 2>/dev/null || true
+        echo "$PCI_ADDR" > /sys/bus/pci/drivers/uio_pci_generic/bind 2>/dev/null || true
+    fi
+}
+
+for PCI in $PCI_DEVICES; do
+    bind_to_dpdk "$PCI"
+done
+
 cp "$TEMPLATE" "$CONF"
 
 sed -i "/^socksvr {/,/^}/ {
@@ -444,4 +508,4 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
   fi
 fi
 
-```
+exit 0

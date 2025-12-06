@@ -6,7 +6,13 @@
 # the Free Software Foundation, either version 3 of the License.
 
 export PATH=$PATH:/usr/local/go/bin
-export PS1='FloofOS# '
+
+# Prompt: floofos@hostname:path $
+if [ "$(id -u)" -eq 0 ]; then
+    export PS1='\[\033[1;36m\]floofos\[\033[0m\]@\[\033[1;33m\]\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
+else
+    export PS1='\[\033[1;32m\]floofos\[\033[0m\]@\[\033[1;33m\]\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
+fi
 
 if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
