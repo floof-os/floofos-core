@@ -1,0 +1,6 @@
+# FloofOS CLI sudo permissions
+# Allow floofos user to run CLI in dataplane namespace without password
+
+floofos ALL=(root) NOPASSWD: /usr/bin/ip netns exec dataplane /usr/bin/floof-cli *
+floofos ALL=(root) NOPASSWD: /usr/bin/ip netns exec dataplane /usr/bin/floof-cli
+

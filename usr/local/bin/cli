@@ -15,10 +15,14 @@ while [ ! -f /var/run/netns/dataplane ] && [ $WAITED -lt $MAX_WAIT ]; do
     WAITED=$((WAITED + 1))
 done
 
-if [ -f /var/run/netns/dataplane ]; then
-    ip netns exec dataplane /usr/bin/floof-cli "$@"
-else
+if [ ! -f /var/run/netns/dataplane ]; then
     echo "Error: dataplane namespace not ready after ${MAX_WAIT}s"
     echo "Check: systemctl status netns-dataplane"
     exit 1
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+    ip netns exec dataplane /usr/bin/floof-cli "$@"
+else
+    sudo ip netns exec dataplane /usr/bin/floof-cli "$@"
 fi
