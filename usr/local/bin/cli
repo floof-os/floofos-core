@@ -22,7 +22,7 @@ if [ ! -f /var/run/netns/dataplane ]; then
 fi
 
 if [ "$(id -u)" -eq 0 ]; then
-    ip netns exec dataplane /usr/bin/floof-cli "$@"
+    /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
 else
-    sudo ip netns exec dataplane /usr/bin/floof-cli "$@"
+    sudo /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
 fi

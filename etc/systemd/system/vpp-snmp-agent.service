@@ -6,16 +6,17 @@
 # the Free Software Foundation, either version 3 of the License.
 
 [Unit]
-Description=VPP SNMP Agent
+Description=VPP SNMP AgentX Bridge (govpp-snmp-agentx)
 After=snmpd.service vpp.service
 Requires=snmpd.service vpp.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/vpp-snmp-agent -config /etc/vpp-snmp-agent/config.yaml
+ExecStart=/usr/local/bin/vpp-snmp-agent -agentx.addr /var/agentx/master -vppcfg /etc/vpp/dataplane.yaml -vppstats.period 30
 Restart=always
 RestartSec=5
 User=root
+Group=vpp
 
 [Install]
 WantedBy=multi-user.target

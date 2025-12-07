@@ -16,6 +16,6 @@ fi
 if [[ -t 0 && -z "$FLOOFCTL_SHELL" ]]; then
     export FLOOFCTL_SHELL=1
     if [ -x /usr/local/bin/cli ]; then
-        /usr/local/bin/cli || echo "CLI exited, returning to shell"
+        exec /usr/local/bin/cli
     fi
 fi
