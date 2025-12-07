@@ -1,0 +1,17 @@
+[Unit]
+Description=SNMP Daemon (Dataplane Namespace)
+After=network.target netns-dataplane.service vpp.service
+Requires=netns-dataplane.service
+Wants=vpp.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/snmpd -LS0-5d -Lf /var/log/snmpd.log -f -p /run/snmpd-dataplane.pid
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+

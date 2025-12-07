@@ -1,0 +1,15 @@
+[Unit]
+Description=nftables Firewall (Dataplane Namespace)
+After=netns-dataplane.service
+Requires=netns-dataplane.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/nft -f /etc/nftables.d/floofos.nft
+ExecReload=/usr/sbin/ip netns exec dataplane /usr/sbin/nft -f /etc/nftables.d/floofos.nft
+ExecStop=/usr/sbin/ip netns exec dataplane /usr/sbin/nft flush ruleset
+
+[Install]
+WantedBy=multi-user.target
+
