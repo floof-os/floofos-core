@@ -7,13 +7,24 @@ if [ -d /sys/module/vfio ]; then
     echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode 2>/dev/null || true
 fi
 
+get_pci_address() {
+    local DEV_PATH="$1"
+    local RESOLVED=$(readlink -f "$DEV_PATH")
+    
+    if echo "$RESOLVED" | grep -qE '/virtio[0-9]+$'; then
+        echo "$RESOLVED" | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]' | tail -1
+    else
+        basename "$RESOLVED"
+    fi
+}
+
 PCI_DEVICES=""
 for dev in /sys/class/net/*/device; do
     [ -L "$dev" ] || continue
     IFACE=$(basename $(dirname $dev))
     [ "$IFACE" = "lo" ] && continue
-    PCI=$(basename $(readlink -f $dev))
-    [ -n "$PCI" ] && PCI_DEVICES="$PCI_DEVICES $PCI"
+    PCI=$(get_pci_address "$dev")
+    [ -n "$PCI" ] && echo "$PCI" | grep -qE '^[0-9a-f]{4}:' && PCI_DEVICES="$PCI_DEVICES $PCI"
 done
 
 [ -z "$PCI_DEVICES" ] && {

@@ -24,13 +24,24 @@ if grep -qE 'hypervisor|VMware|VirtualBox|QEMU|Xen' /proc/cpuinfo 2>/dev/null ||
     IS_VM=1
 fi
 
+get_pci_address() {
+    local DEV_PATH="$1"
+    local RESOLVED=$(readlink -f "$DEV_PATH")
+    
+    if echo "$RESOLVED" | grep -qE '/virtio[0-9]+$'; then
+        echo "$RESOLVED" | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]' | tail -1
+    else
+        basename "$RESOLVED"
+    fi
+}
+
 PCI_DEVICES=""
 for dev in /sys/class/net/*/device; do
     [ -L "$dev" ] || continue
     IFACE=$(basename $(dirname $dev))
     [ "$IFACE" = "lo" ] && continue
-    PCI=$(basename $(readlink -f $dev))
-    [ -n "$PCI" ] && PCI_DEVICES="$PCI_DEVICES $PCI"
+    PCI=$(get_pci_address "$dev")
+    [ -n "$PCI" ] && echo "$PCI" | grep -qE '^[0-9a-f]{4}:' && PCI_DEVICES="$PCI_DEVICES $PCI"
 done
 PCI_DEVICES=$(echo $PCI_DEVICES | tr ' ' '\n' | sort -u | tr '\n' ' ')
 NIC_COUNT=$(echo "$PCI_DEVICES" | wc -w)
