@@ -280,9 +280,7 @@ fi
 umount "$MOUNT_DIR"
 
 echo ""
-echo "Installation completed successfully!"
+echo "FloofOS installation on disk completed successfully"
 echo ""
-echo "Installation complete."
-echo ""
-echo "Remove the installation media and reboot the system."
-echo "To reboot now, type: reboot"
+echo "Remove the installation media and reboot the system"
+echo "To reboot now, enter configuration mode 'configure' and type 'system reboot'"
