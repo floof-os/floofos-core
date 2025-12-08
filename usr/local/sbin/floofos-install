@@ -73,32 +73,56 @@ echo "[1/9] Unmounting existing partitions..."
 umount ${DISK}* 2>/dev/null || true
 swapoff ${DISK}* 2>/dev/null || true
 
+IS_UEFI="false"
+if [ -d /sys/firmware/efi ]; then
+    IS_UEFI="true"
+fi
+
 echo "[2/9] Creating partition table..."
 parted -s "$DISK" mklabel gpt
-parted -s "$DISK" mkpart primary fat32 1MiB 513MiB
-parted -s "$DISK" set 1 esp on
-parted -s "$DISK" mkpart primary ext4 513MiB 100%
+
+if [ "$IS_UEFI" = "true" ]; then
+    parted -s "$DISK" mkpart primary fat32 1MiB 513MiB
+    parted -s "$DISK" set 1 esp on
+    parted -s "$DISK" mkpart primary ext4 513MiB 100%
+else
+    parted -s "$DISK" mkpart grub 1MiB 3MiB
+    parted -s "$DISK" set 1 bios_grub on
+    parted -s "$DISK" mkpart primary ext4 3MiB 100%
+fi
 
 sleep 2
 
 if [[ "$DISK" == *"nvme"* ]]; then
-    EFI_PART="${DISK}p1"
-    ROOT_PART="${DISK}p2"
+    if [ "$IS_UEFI" = "true" ]; then
+        EFI_PART="${DISK}p1"
+        ROOT_PART="${DISK}p2"
+    else
+        ROOT_PART="${DISK}p2"
+    fi
 else
-    EFI_PART="${DISK}1"
-    ROOT_PART="${DISK}2"
+    if [ "$IS_UEFI" = "true" ]; then
+        EFI_PART="${DISK}1"
+        ROOT_PART="${DISK}2"
+    else
+        ROOT_PART="${DISK}2"
+    fi
 fi
 
 echo "[3/9] Formatting partitions..."
-mkfs.fat -F32 "$EFI_PART"
+if [ "$IS_UEFI" = "true" ]; then
+    mkfs.fat -F32 "$EFI_PART"
+fi
 mkfs.ext4 -F -L floofos-root "$ROOT_PART"
 
 echo "[4/9] Mounting target filesystem..."
 MOUNT_DIR="/mnt/floofos-install"
 mkdir -p "$MOUNT_DIR"
 mount "$ROOT_PART" "$MOUNT_DIR"
-mkdir -p "$MOUNT_DIR/boot/efi"
-mount "$EFI_PART" "$MOUNT_DIR/boot/efi"
+if [ "$IS_UEFI" = "true" ]; then
+    mkdir -p "$MOUNT_DIR/boot/efi"
+    mount "$EFI_PART" "$MOUNT_DIR/boot/efi"
+fi
 
 echo "[5/9] Copying system files..."
 rsync -aAXv --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found","/swapfile"} / "$MOUNT_DIR/" 2>/dev/null
@@ -119,13 +143,18 @@ echo "floofos:$PASSWORD" | chroot "$MOUNT_DIR" chpasswd
 echo "root:$PASSWORD" | chroot "$MOUNT_DIR" chpasswd
 
 ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
-EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 
-cat > "$MOUNT_DIR/etc/fstab" <<EOF
-# FloofOS filesystem table
+if [ "$IS_UEFI" = "true" ]; then
+    EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
+    cat > "$MOUNT_DIR/etc/fstab" <<EOF
 UUID=$ROOT_UUID   /           ext4    errors=remount-ro   0   1
 UUID=$EFI_UUID    /boot/efi   vfat    umask=0077          0   1
 EOF
+else
+    cat > "$MOUNT_DIR/etc/fstab" <<EOF
+UUID=$ROOT_UUID   /           ext4    errors=remount-ro   0   1
+EOF
+fi
 
 if [ "$CONSOLE" = "serial" ]; then
     mkdir -p "$MOUNT_DIR/etc/default"
@@ -222,8 +251,12 @@ mount --bind /dev/pts "$MOUNT_DIR/dev/pts"
 mount --bind /proc "$MOUNT_DIR/proc"
 mount --bind /sys "$MOUNT_DIR/sys"
 
-chroot "$MOUNT_DIR" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=FloofOS --recheck 2>/dev/null || \
-chroot "$MOUNT_DIR" grub-install --target=i386-pc "$DISK" 2>/dev/null || true
+if [ "$IS_UEFI" = "true" ]; then
+    mount --bind /sys/firmware/efi/efivars "$MOUNT_DIR/sys/firmware/efi/efivars" 2>/dev/null || true
+    chroot "$MOUNT_DIR" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=FloofOS --recheck
+else
+    chroot "$MOUNT_DIR" grub-install --target=i386-pc "$DISK"
+fi
 
 chroot "$MOUNT_DIR" update-grub
 
@@ -231,14 +264,25 @@ chroot "$MOUNT_DIR" update-initramfs -u -k all
 
 echo "[9/9] Cleaning up..."
 
+if [ "$IS_UEFI" = "true" ]; then
+    umount "$MOUNT_DIR/sys/firmware/efi/efivars" 2>/dev/null || true
+fi
 umount "$MOUNT_DIR/sys" 2>/dev/null || true
 umount "$MOUNT_DIR/proc" 2>/dev/null || true
 umount "$MOUNT_DIR/dev/pts" 2>/dev/null || true
 umount "$MOUNT_DIR/dev" 2>/dev/null || true
 
 sync
-umount "$MOUNT_DIR/boot/efi"
+
+if [ "$IS_UEFI" = "true" ]; then
+    umount "$MOUNT_DIR/boot/efi" 2>/dev/null || true
+fi
 umount "$MOUNT_DIR"
 
 echo ""
 echo "Installation completed successfully!"
+echo ""
+echo "Installation complete."
+echo ""
+echo "Remove the installation media and reboot the system."
+echo "To reboot now, type: reboot"
