@@ -19,8 +19,7 @@ socksvr {
   default
 }
 
-dpdk {
-  uio-driver vfio-pci 
+dpdk { 
   no-multi-seg
   no-tx-checksum-offload
 }
