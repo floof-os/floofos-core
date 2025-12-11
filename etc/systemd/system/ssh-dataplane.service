@@ -11,8 +11,9 @@ After=network.target netns-dataplane.service
 Requires=netns-dataplane.service
 
 [Service]
-ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/sshd -D -f /etc/ssh/sshd_config -oPidFile=/run/sshd-dataplane.pid
-Type=simple
+ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/sshd -oPidFile=/run/sshd-dataplane.pid
+Type=forking
+KillMode=process
 Restart=on-failure
 RestartSec=10s
 
