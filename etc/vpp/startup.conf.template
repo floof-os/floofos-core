@@ -20,8 +20,6 @@ socksvr {
 }
 
 dpdk { 
-  no-multi-seg
-  no-tx-checksum-offload
 }
 
 linux-cp {
