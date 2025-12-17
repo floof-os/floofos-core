@@ -5,7 +5,6 @@ unix {
   cli-listen /run/vpp/cli.sock
   gid vpp
   interactive
-  poll-sleep-usec 100
   exec /etc/vpp/config/bootstrap.vpp
   coredump-size unlimited
 }

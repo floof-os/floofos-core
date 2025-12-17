@@ -55,7 +55,7 @@ declare -A NIC_SPEEDS
 MAX_NIC_SPEED=0
 
 for PCI in $PCI_DEVICES; do
-    NIC_NAME=$(lspci -s $PCI 2>/dev/null | grep -oP '(10G|25G|40G|50G|100G|200G|400G)')
+    NIC_NAME=$(lspci -s $PCI 2>/dev/null | grep -oP '(2\.5G|2500|10G|25G|40G|50G|100G|200G|400G)')
   
   case "$NIC_NAME" in
     *400G*) SPEED=400000 ;;
@@ -65,6 +65,7 @@ for PCI in $PCI_DEVICES; do
     *40G*)  SPEED=40000 ;;
     *25G*)  SPEED=25000 ;;
     *10G*)  SPEED=10000 ;;
+    *2.5G*|*2500*) SPEED=2500 ;;
     *)      SPEED=1000 ;;
   esac
   
@@ -360,6 +361,10 @@ for PCI in $PCI_DEVICES; do
 done
 
 cp "$TEMPLATE" "$CONF"
+
+if [ $IS_VM -eq 1 ]; then
+  sed -i '/interactive/a\  poll-sleep-usec 100' "$CONF"
+fi
 
 sed -i "/^socksvr {/,/^}/ {
   /^}/a\\
