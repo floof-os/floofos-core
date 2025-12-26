@@ -4,7 +4,7 @@ LOG="/var/log/vpp/auto-config.log"
 mkdir -p /var/log/vpp
 exec > >(tee -a "$LOG") 2>&1
 
-echo "Hello :), FloofOS VPP Tuning started at $(date)"
+echo "FloofOS VPP auto-configuration started at $(date)"
 
 TEMPLATE="/etc/vpp/startup.conf.template"
 CONF="/etc/vpp/startup.conf"
@@ -781,7 +781,11 @@ NUM_MBUFS=$((BUFFERS_PER_NUMA * NUMA_NODES * 2))
 [ $NUM_MBUFS -lt 65536 ] && NUM_MBUFS=65536
 [ $NUM_MBUFS -gt 1048576 ] && NUM_MBUFS=1048576
 
-sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR\n  num-mbufs $NUM_MBUFS\n  no-tx-checksum-offload/" "$CONF"
+if [ $IS_VM -eq 1 ]; then
+    sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR/" "$CONF"
+else
+    sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR\n  num-mbufs $NUM_MBUFS/" "$CONF"
+fi
 
 for PCI in $PCI_DEVICES; do
     nic_speed=${NIC_SPEEDS[$PCI]}
@@ -868,18 +872,30 @@ $CPU_SECTION
 }" "$CONF"
 
 if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" ]; then
-    if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ]; then
+    if [ $IS_VM -eq 1 ]; then
+        FIB_HEAP="128M"
+        NAT_TRANSLATIONS=262144
+        SESSION_BUCKETS=10000
+        SESSION_MEM="32M"
+        ACL_HEAP="128M"
+        SESSION_PREALLOC=1024
+        EVENT_QUEUE_LEN=4096
+    elif [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ]; then
         FIB_HEAP="2G"
         NAT_TRANSLATIONS=4194304
         SESSION_BUCKETS=100000
         SESSION_MEM="256M"
         ACL_HEAP="1G"
+        SESSION_PREALLOC=8192
+        EVENT_QUEUE_LEN=32768
     else
         FIB_HEAP="512M"
         NAT_TRANSLATIONS=1048576
         SESSION_BUCKETS=20000
         SESSION_MEM="64M"
         ACL_HEAP="512M"
+        SESSION_PREALLOC=4096
+        EVENT_QUEUE_LEN=16384
     fi
     
     sed -i "/^logging {/i\\
@@ -892,14 +908,13 @@ ip6 {\\
 }\\
 \\
 nat {\\
-  endpoint-dependent\\
-  max translations per thread $NAT_TRANSLATIONS\\
+  max-translations-per-thread $NAT_TRANSLATIONS\\
 }\\
 \\
 session {\\
   evt_qs_memfd_seg\\
-  event-queue-length 16384\\
-  preallocated-sessions 4096\\
+  event-queue-length $EVENT_QUEUE_LEN\\
+  preallocated-sessions $SESSION_PREALLOC\\
   v4-session-table-buckets $SESSION_BUCKETS\\
   v4-session-table-memory $SESSION_MEM\\
   v6-session-table-buckets $SESSION_BUCKETS\\
@@ -907,8 +922,8 @@ session {\\
 }\\
 \\
 acl-plugin {\\
-  use tuple merge 1\\
-  hash lookup heap size $ACL_HEAP\\
+  use-tuple-merge 1\\
+  hash-lookup-heap-size $ACL_HEAP\\
 }\\
 " "$CONF"
 fi

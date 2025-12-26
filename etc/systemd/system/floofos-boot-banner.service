@@ -1,0 +1,18 @@
+[Unit]
+Description=FloofOS Boot Banner
+DefaultDependencies=no
+Before=sysinit.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/floofos-boot-banner
+StandardOutput=tty
+StandardInput=tty
+TTYPath=/dev/console
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=sysinit.target
+

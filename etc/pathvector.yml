@@ -28,7 +28,7 @@ bgpq-args: "-S AFRINIC,APNIC,ARIN,LACNIC,RIPE"
 irr-server: rr.ntt.net
 irr-query-timeout: 30
 
-rtr-server: rtr.rpki.cloudflare.com:8282
+rtr-server: 172.65.0.2:8282
 
 #peeringdb-api-key: "your-api-key-here"
 #peeringdb-query-timeout: 30
