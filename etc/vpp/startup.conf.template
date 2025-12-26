@@ -4,7 +4,6 @@ unix {
   full-coredump
   cli-listen /run/vpp/cli.sock
   gid vpp
-  interactive
   exec /etc/vpp/config/bootstrap.vpp
   coredump-size unlimited
 }

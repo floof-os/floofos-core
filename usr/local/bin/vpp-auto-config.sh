@@ -873,29 +873,21 @@ $CPU_SECTION
 
 if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" ]; then
     if [ $IS_VM -eq 1 ]; then
-        FIB_HEAP="128M"
-        ACL_HEAP="128M"
+        ACL_HEAP="64M"
     elif [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ]; then
-        FIB_HEAP="2G"
         ACL_HEAP="1G"
     else
-        FIB_HEAP="512M"
-        ACL_HEAP="512M"
+        ACL_HEAP="256M"
     fi
     
     cat >> "$CONF" <<EOF
 
-ip {
-  heap-size $FIB_HEAP
-}
-
-ip6 {
-  heap-size $FIB_HEAP
-}
-
 acl-plugin {
-  use tuple merge 1
+  connection hash buckets 65536
+  connection hash memory $ACL_HEAP
+  connection count max 500000
   hash lookup heap size $ACL_HEAP
+  use tuple merge 1
 }
 EOF
 fi
