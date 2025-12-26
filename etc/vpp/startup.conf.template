@@ -36,7 +36,6 @@ plugins {
   plugin dpdk_plugin.so { enable }
   plugin linux_cp_plugin.so { enable }
   plugin linux_nl_plugin.so { enable }
-  plugin nat44_ed_plugin.so { enable }
   plugin acl_plugin.so { enable }
   plugin perfmon_plugin.so { disable }
   plugin unittest_plugin.so { disable }

@@ -874,58 +874,30 @@ $CPU_SECTION
 if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" ]; then
     if [ $IS_VM -eq 1 ]; then
         FIB_HEAP="128M"
-        NAT_TRANSLATIONS=262144
-        SESSION_BUCKETS=10000
-        SESSION_MEM="32M"
         ACL_HEAP="128M"
-        SESSION_PREALLOC=1024
-        EVENT_QUEUE_LEN=4096
     elif [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ]; then
         FIB_HEAP="2G"
-        NAT_TRANSLATIONS=4194304
-        SESSION_BUCKETS=100000
-        SESSION_MEM="256M"
         ACL_HEAP="1G"
-        SESSION_PREALLOC=8192
-        EVENT_QUEUE_LEN=32768
     else
         FIB_HEAP="512M"
-        NAT_TRANSLATIONS=1048576
-        SESSION_BUCKETS=20000
-        SESSION_MEM="64M"
         ACL_HEAP="512M"
-        SESSION_PREALLOC=4096
-        EVENT_QUEUE_LEN=16384
     fi
     
-    sed -i "/^logging {/i\\
-ip {\\
-  heap-size $FIB_HEAP\\
-}\\
-\\
-ip6 {\\
-  heap-size $FIB_HEAP\\
-}\\
-\\
-nat {\\
-  max-translations-per-thread $NAT_TRANSLATIONS\\
-}\\
-\\
-session {\\
-  evt_qs_memfd_seg\\
-  event-queue-length $EVENT_QUEUE_LEN\\
-  preallocated-sessions $SESSION_PREALLOC\\
-  v4-session-table-buckets $SESSION_BUCKETS\\
-  v4-session-table-memory $SESSION_MEM\\
-  v6-session-table-buckets $SESSION_BUCKETS\\
-  v6-session-table-memory $SESSION_MEM\\
-}\\
-\\
-acl-plugin {\\
-  use-tuple-merge 1\\
-  hash-lookup-heap-size $ACL_HEAP\\
-}\\
-" "$CONF"
+    cat >> "$CONF" <<EOF
+
+ip {
+  heap-size $FIB_HEAP
+}
+
+ip6 {
+  heap-size $FIB_HEAP
+}
+
+acl-plugin {
+  use tuple merge 1
+  hash lookup heap size $ACL_HEAP
+}
+EOF
 fi
 
 if [ "$DEPLOYMENT_PROFILE" != "micro" ] && [ "$DEPLOYMENT_PROFILE" != "minimal" ]; then
