@@ -774,7 +774,7 @@ done
 cp "$TEMPLATE" "$CONF"
 
 if [ $IS_VM -eq 1 ]; then
-    sed -i '/interactive/a\  poll-sleep-usec 100' "$CONF"
+    sed -i '/gid vpp/a\  poll-sleep-usec 100' "$CONF"
 fi
 
 NUM_MBUFS=$((BUFFERS_PER_NUMA * NUMA_NODES * 2))
