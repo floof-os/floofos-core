@@ -11,15 +11,39 @@ CONF="/etc/vpp/startup.conf"
 
 TOTAL_RAM=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 FREE_RAM=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
-CPU_CORES=$(nproc)
+LOGICAL_CORES=$(nproc)
 CPU_SOCKETS=$(lscpu | grep "Socket(s):" | awk '{print $2}')
 NUMA_NODES=$(lscpu | grep "NUMA node(s):" | awk '{print $3}')
 CORES_PER_SOCKET=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 THREADS_PER_CORE=$(lscpu | grep "Thread(s) per core:" | awk '{print $4}')
 [ -z "$CPU_SOCKETS" ] && CPU_SOCKETS=1
 [ -z "$NUMA_NODES" ] && NUMA_NODES=1
-[ -z "$CORES_PER_SOCKET" ] && CORES_PER_SOCKET=$((CPU_CORES / CPU_SOCKETS))
+[ -z "$CORES_PER_SOCKET" ] && CORES_PER_SOCKET=$((LOGICAL_CORES / CPU_SOCKETS))
 [ -z "$THREADS_PER_CORE" ] && THREADS_PER_CORE=1
+
+PHYSICAL_CORES=$((LOGICAL_CORES / THREADS_PER_CORE))
+HT_ENABLED=0
+if [ $THREADS_PER_CORE -gt 1 ]; then
+    HT_ENABLED=1
+    CPU_CORES=$PHYSICAL_CORES
+    
+    PHYSICAL_CORE_LIST=""
+    if [ -d /sys/devices/system/cpu/cpu0/topology ]; then
+        for cpu in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
+            [ -f "$cpu" ] || continue
+            first_thread=$(cat "$cpu" | cut -d',' -f1 | cut -d'-' -f1)
+            if ! echo "$PHYSICAL_CORE_LIST" | grep -qw "$first_thread"; then
+                [ -n "$PHYSICAL_CORE_LIST" ] && PHYSICAL_CORE_LIST="$PHYSICAL_CORE_LIST "
+                PHYSICAL_CORE_LIST="${PHYSICAL_CORE_LIST}${first_thread}"
+            fi
+        done
+        PHYSICAL_CORE_LIST=$(echo "$PHYSICAL_CORE_LIST" | tr ' ' '\n' | sort -n | tr '\n' ' ')
+    fi
+    echo "HT enabled: $LOGICAL_CORES logical, $PHYSICAL_CORES physical cores"
+else
+    CPU_CORES=$LOGICAL_CORES
+    PHYSICAL_CORE_LIST=""
+fi
 
 CPU_MODEL=$(lscpu | grep "Model name:" | cut -d':' -f2 | xargs)
 HAS_AVX512=$(grep -o 'avx512' /proc/cpuinfo | head -1)
@@ -36,9 +60,57 @@ echo "Sockets: $CPU_SOCKETS, NUMA nodes: $NUMA_NODES, Cores: $CPU_CORES"
 echo "RAM: ${TOTAL_RAM}MB, Features: $CPU_FEATURES"
 echo "Environment: $([ $IS_VM -eq 1 ] && echo 'Virtual Machine' || echo 'Bare Metal')"
 
+get_physical_cores_for_numa() {
+    local node=$1
+    local cores=""
+    
+    if [ $HT_ENABLED -eq 0 ]; then
+        if [ -f "/sys/devices/system/node/node${node}/cpulist" ]; then
+            cat /sys/devices/system/node/node${node}/cpulist
+        else
+            local start=$((node * (CPU_CORES / NUMA_NODES)))
+            local end=$(( (node + 1) * (CPU_CORES / NUMA_NODES) - 1 ))
+            echo "${start}-${end}"
+        fi
+        return
+    fi
+    
+    for cpu in /sys/devices/system/cpu/cpu[0-9]*/; do
+        local cpu_id=$(basename "$cpu" | sed 's/cpu//')
+        local cpu_numa=$(cat "$cpu/topology/physical_package_id" 2>/dev/null || echo "0")
+        
+        [ -f "/sys/devices/system/node/node${node}/cpulist" ] && {
+            local numa_cpus=$(cat /sys/devices/system/node/node${node}/cpulist)
+            if ! echo "$numa_cpus" | grep -qE "(^|,)${cpu_id}(,|$|-)" 2>/dev/null; then
+                echo "$numa_cpus" | tr ',' '\n' | while read range; do
+                    if echo "$range" | grep -q '-'; then
+                        local rs=$(echo "$range" | cut -d'-' -f1)
+                        local re=$(echo "$range" | cut -d'-' -f2)
+                        [ $cpu_id -ge $rs ] && [ $cpu_id -le $re ] || continue
+                    else
+                        [ "$range" = "$cpu_id" ] || continue
+                    fi
+                    break
+                done || continue
+            fi
+        }
+        
+        if [ -f "$cpu/topology/thread_siblings_list" ]; then
+            local first=$(cat "$cpu/topology/thread_siblings_list" | cut -d',' -f1 | cut -d'-' -f1)
+            if [ "$first" = "$cpu_id" ]; then
+                [ -n "$cores" ] && cores="$cores,"
+                cores="${cores}${cpu_id}"
+            fi
+        fi
+    done
+    
+    echo "$cores" | tr ',' '\n' | sort -n | tr '\n' ',' | sed 's/,$//'
+}
+
 declare -A NUMA_CPUS_START
 declare -A NUMA_CPUS_END
 declare -A NUMA_CPUS_LIST
+declare -A NUMA_PHYSICAL_CORES
 declare -A NUMA_MEM_MB
 declare -A NUMA_NIC_COUNT
 declare -A NUMA_NIC_LIST
@@ -70,6 +142,21 @@ for node in $(seq 0 $((NUMA_NODES-1))); do
         NUMA_CPUS_START[$node]=$((node * cores_per_node))
         NUMA_CPUS_END[$node]=$(( (node + 1) * cores_per_node - 1 ))
         NUMA_CPUS_LIST[$node]="${NUMA_CPUS_START[$node]}-${NUMA_CPUS_END[$node]}"
+    fi
+    
+    if [ $HT_ENABLED -eq 1 ]; then
+        phys_cores=""
+        for cpu_id in $(seq ${NUMA_CPUS_START[$node]} ${NUMA_CPUS_END[$node]}); do
+            [ -f "/sys/devices/system/cpu/cpu${cpu_id}/topology/thread_siblings_list" ] || continue
+            first=$(cat /sys/devices/system/cpu/cpu${cpu_id}/topology/thread_siblings_list | cut -d',' -f1 | cut -d'-' -f1)
+            if [ "$first" = "$cpu_id" ]; then
+                [ -n "$phys_cores" ] && phys_cores="$phys_cores,"
+                phys_cores="${phys_cores}${cpu_id}"
+            fi
+        done
+        NUMA_PHYSICAL_CORES[$node]="$phys_cores"
+    else
+        NUMA_PHYSICAL_CORES[$node]="${NUMA_CPUS_START[$node]}-${NUMA_CPUS_END[$node]}"
     fi
     
     if [ -f "/sys/devices/system/node/node${node}/meminfo" ]; then
@@ -310,10 +397,7 @@ BUFFERS_PER_NUMA=$power
 max_buffers=2097152
 [ $BUFFERS_PER_NUMA -gt $max_buffers ] && BUFFERS_PER_NUMA=$max_buffers
 
-echo "Buffers calculation:"
-echo "  Total queues: $total_queues"
-echo "  Bandwidth: ${bandwidth_gbps}Gbps (burst factor: ${burst_factor}x)"
-echo "  buffers-per-numa: $BUFFERS_PER_NUMA"
+echo "Buffers: $BUFFERS_PER_NUMA per-numa (queues: $total_queues, bw: ${bandwidth_gbps}Gbps)"
 
 case "$DEPLOYMENT_PROFILE" in
     micro)     base_heap=256 ;;
@@ -347,30 +431,15 @@ HEAP_SIZE_MB=$power
 max_heap=65536
 [ $HEAP_SIZE_MB -gt $max_heap ] && HEAP_SIZE_MB=$max_heap
 
-echo "Heap calculation:"
-echo "  Base: ${base_heap}MB, Workers: ${worker_heap}MB, Features: ${feature_heap}MB"
-echo "  main-heap-size: ${HEAP_SIZE_MB}MB"
+echo "Heap: ${HEAP_SIZE_MB}MB"
 
+MAIN_CORE=0
 if [ $CPU_CORES -le 2 ]; then
-    MAIN_CORE=0
-    SKIP_CORES=0
     WORKER_CORES=1
-elif [ $CPU_CORES -le 4 ]; then
-    MAIN_CORE=0
-    SKIP_CORES=0
-    WORKER_CORES=$((CPU_CORES - 1))
-elif [ $CPU_CORES -le 8 ]; then
-    MAIN_CORE=0
-    SKIP_CORES=1
-    WORKER_CORES=$((CPU_CORES - 2))
-elif [ $CPU_CORES -le 16 ]; then
-    MAIN_CORE=0
-    SKIP_CORES=1
-    WORKER_CORES=$((CPU_CORES - 2))
+elif [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
+    WORKER_CORES=$((CPU_CORES - NUMA_NODES))
 else
-    MAIN_CORE=0
-    SKIP_CORES=1
-    WORKER_CORES=$((CPU_CORES - 2))
+    WORKER_CORES=$((CPU_CORES - 1))
 fi
 
 MAX_VPP_WORKERS=62
@@ -378,6 +447,8 @@ if [ $WORKER_CORES -gt $MAX_VPP_WORKERS ]; then
     echo "Note: Limiting workers from $WORKER_CORES to $MAX_VPP_WORKERS (VPP bitmap limit)"
     WORKER_CORES=$MAX_VPP_WORKERS
 fi
+
+echo "CPU: $CPU_CORES cores, $NUMA_NODES NUMA, main=$MAIN_CORE, workers=$WORKER_CORES"
 
 if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
     total_bw=0
@@ -415,55 +486,92 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
         done
     fi
     
-    echo "Worker distribution (NIC-affinity mode):"
     for node in $(seq 0 $((NUMA_NODES-1))); do
-        echo "  NUMA $node: ${WORKERS_PER_NUMA[$node]} workers (bandwidth: ${NUMA_BANDWIDTH[$node]}Mbps)"
+        echo "NUMA $node: ${WORKERS_PER_NUMA[$node]} workers, ${NUMA_BANDWIDTH[$node]}Mbps"
     done
     
     WORKER_LIST=""
-    for node in $(seq 0 $((NUMA_NODES-1))); do
-        node_workers=${WORKERS_PER_NUMA[$node]}
-        [ $node_workers -eq 0 ] && continue
-        
-        node_start=${NUMA_CPUS_START[$node]}
-        node_end=${NUMA_CPUS_END[$node]}
-        
-        if [ $node -eq 0 ]; then
-            worker_start=$((node_start + SKIP_CORES + 1))
-        else
-            worker_start=$node_start
-        fi
-        
-        worker_end=$((worker_start + node_workers - 1))
-        [ $worker_end -gt $node_end ] && worker_end=$node_end
-        
-        if [ $worker_start -le $worker_end ]; then
-            [ -n "$WORKER_LIST" ] && WORKER_LIST="${WORKER_LIST},"
-            if [ $worker_start -eq $worker_end ]; then
-                WORKER_LIST="${WORKER_LIST}${worker_start}"
-            else
-                WORKER_LIST="${WORKER_LIST}${worker_start}-${worker_end}"
-            fi
-        fi
-    done
+    SKIPPED_CORES=""
     
-    echo "Workers: $WORKER_LIST"
+    if [ $HT_ENABLED -eq 1 ]; then
+        for node in $(seq 0 $((NUMA_NODES-1))); do
+            node_workers=${WORKERS_PER_NUMA[$node]}
+            [ $node_workers -eq 0 ] && continue
+            
+            phys_cores="${NUMA_PHYSICAL_CORES[$node]}"
+            core_array=($(echo "$phys_cores" | tr ',' ' '))
+            
+            skip_count=1
+            [ $node -gt 0 ] && SKIPPED_CORES="${SKIPPED_CORES} ${core_array[0]}"
+            
+            added=0
+            for core in "${core_array[@]}"; do
+                if [ $skip_count -gt 0 ]; then
+                    skip_count=$((skip_count - 1))
+                    continue
+                fi
+                [ $added -ge $node_workers ] && break
+                [ -n "$WORKER_LIST" ] && WORKER_LIST="${WORKER_LIST},"
+                WORKER_LIST="${WORKER_LIST}${core}"
+                added=$((added + 1))
+            done
+        done
+    else
+        for node in $(seq 0 $((NUMA_NODES-1))); do
+            node_workers=${WORKERS_PER_NUMA[$node]}
+            [ $node_workers -eq 0 ] && continue
+            
+            node_start=${NUMA_CPUS_START[$node]}
+            node_end=${NUMA_CPUS_END[$node]}
+            
+            if [ $node -eq 0 ]; then
+                worker_start=$((node_start + 1))
+            else
+                worker_start=$((node_start + 1))
+                SKIPPED_CORES="${SKIPPED_CORES} ${node_start}"
+            fi
+            
+            worker_end=$((worker_start + node_workers - 1))
+            [ $worker_end -gt $node_end ] && worker_end=$node_end
+            
+            if [ $worker_start -le $worker_end ]; then
+                [ -n "$WORKER_LIST" ] && WORKER_LIST="${WORKER_LIST},"
+                if [ $worker_start -eq $worker_end ]; then
+                    WORKER_LIST="${WORKER_LIST}${worker_start}"
+                else
+                    WORKER_LIST="${WORKER_LIST}${worker_start}-${worker_end}"
+                fi
+            fi
+        done
+    fi
+    
+    echo "Workers: $WORKER_LIST (physical cores only)"
+    [ -n "$SKIPPED_CORES" ] && echo "Skipped:$SKIPPED_CORES"
 else
-    if [ $SKIP_CORES -gt 0 ]; then
-        worker_start=$((MAIN_CORE + SKIP_CORES + 1))
+    if [ $HT_ENABLED -eq 1 ]; then
+        phys_cores="${NUMA_PHYSICAL_CORES[0]}"
+        core_array=($(echo "$phys_cores" | tr ',' ' '))
+        
+        WORKER_LIST=""
+        added=0
+        for core in "${core_array[@]}"; do
+            [ "$core" = "$MAIN_CORE" ] && continue
+            [ $added -ge $WORKER_CORES ] && break
+            [ -n "$WORKER_LIST" ] && WORKER_LIST="${WORKER_LIST},"
+            WORKER_LIST="${WORKER_LIST}${core}"
+            added=$((added + 1))
+        done
     else
         worker_start=$((MAIN_CORE + 1))
+        worker_end=$((worker_start + WORKER_CORES - 1))
+        
+        if [ $worker_start -eq $worker_end ]; then
+            WORKER_LIST="$worker_start"
+        else
+            WORKER_LIST="${worker_start}-${worker_end}"
+        fi
     fi
-    worker_end=$((worker_start + WORKER_CORES - 1))
     
-    if [ $worker_start -eq $worker_end ]; then
-        WORKER_LIST="$worker_start"
-    else
-        WORKER_LIST="${worker_start}-${worker_end}"
-    fi
-    
-    echo "Worker distribution (single NUMA):"
-    echo "  NUMA 0: $WORKER_CORES workers (all NICs)"
     echo "Workers: $WORKER_LIST"
 fi
 
@@ -508,14 +616,7 @@ BASE_MEM=$((HEAP_SIZE_MB + BUFFER_MEM_MB + STATSEG_SIZE + API_MEM + total_socket
 OVERHEAD_MB=$(( (BASE_MEM * OVERHEAD_PERCENT) / 100 ))
 TOTAL_HUGE_MEM_MB=$((BASE_MEM + OVERHEAD_MB))
 
-echo "Memory calculation:"
-echo "  Heap: ${HEAP_SIZE_MB}MB"
-echo "  Buffers: ${BUFFER_MEM_MB}MB (${BUFFERS_PER_NUMA} × ${BUFFER_SIZE_BYTES}B × ${NUMA_NODES} NUMA)"
-echo "  Socket-mem: ${total_socket_mem}MB"
-echo "  Statseg: ${STATSEG_SIZE}MB"
-echo "  API: ${API_MEM}MB"
-echo "  Overhead (${OVERHEAD_PERCENT}%): ${OVERHEAD_MB}MB"
-echo "  Total: ${TOTAL_HUGE_MEM_MB}MB"
+echo "Memory: ${TOTAL_HUGE_MEM_MB}MB total (heap ${HEAP_SIZE_MB}MB, buffers ${BUFFER_MEM_MB}MB, socket-mem ${total_socket_mem}MB)"
 
 NR_HUGEPAGES=$((TOTAL_HUGE_MEM_MB / 2))
 
@@ -539,7 +640,7 @@ while [ $power -lt $NR_HUGEPAGES ]; do
 done
 NR_HUGEPAGES=$power
 
-echo "Hugepages: $NR_HUGEPAGES ($(( NR_HUGEPAGES * 2 ))MB, max allowed: $((MAX_HUGEPAGES * 2))MB)"
+echo "Hugepages: $NR_HUGEPAGES ($(( NR_HUGEPAGES * 2 ))MB)"
 
 VM_MAX_MAP_COUNT=$((NR_HUGEPAGES * 3 + 2048))
 [ $VM_MAX_MAP_COUNT -lt 65536 ] && VM_MAX_MAP_COUNT=65536
@@ -566,14 +667,47 @@ net.core.rmem_default=$NETLINK_MEM
 net.core.wmem_default=$NETLINK_MEM
 net.core.rmem_max=$((NETLINK_MEM * 2))
 net.core.wmem_max=$((NETLINK_MEM * 2))
-net.core.netdev_max_backlog=10000
-net.core.netdev_budget=1000
+net.core.netdev_max_backlog=300000
+net.core.netdev_budget=50000
+net.core.netdev_budget_usecs=8000
 net.core.somaxconn=65535
+net.core.optmem_max=67108864
 net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.tcp_mem=67108864 134217728 268435456
+net.ipv4.udp_mem=67108864 134217728 268435456
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.ipv4.udp_rmem_min=16384
+net.ipv4.udp_wmem_min=16384
+net.ipv4.ip_local_port_range=1024 65535
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_syncookies=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+net.ipv6.conf.all.forwarding=1
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv6.conf.all.accept_redirects=0
 EOFNETLINK
+
+cat > /etc/sysctl.d/82-vpp-performance.conf <<EOFPERF
+kernel.sched_min_granularity_ns=10000000
+kernel.sched_wakeup_granularity_ns=15000000
+kernel.sched_migration_cost_ns=5000000
+kernel.sched_autogroup_enabled=0
+kernel.numa_balancing=0
+vm.zone_reclaim_mode=0
+vm.swappiness=10
+vm.dirty_ratio=40
+vm.dirty_background_ratio=10
+vm.vfs_cache_pressure=50
+EOFPERF
 
 sysctl -p -f /etc/sysctl.d/80-vpp.conf >/dev/null 2>&1
 sysctl -p -f /etc/sysctl.d/81-vpp-netlink.conf >/dev/null 2>&1
+sysctl -p -f /etc/sysctl.d/82-vpp-performance.conf >/dev/null 2>&1
 
 if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ]; then
     SCHEDULER_POLICY="fifo"
@@ -643,7 +777,11 @@ if [ $IS_VM -eq 1 ]; then
     sed -i '/interactive/a\  poll-sleep-usec 100' "$CONF"
 fi
 
-sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR/" "$CONF"
+NUM_MBUFS=$((BUFFERS_PER_NUMA * NUMA_NODES * 2))
+[ $NUM_MBUFS -lt 65536 ] && NUM_MBUFS=65536
+[ $NUM_MBUFS -gt 1048576 ] && NUM_MBUFS=1048576
+
+sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR\n  num-mbufs $NUM_MBUFS\n  no-tx-checksum-offload/" "$CONF"
 
 for PCI in $PCI_DEVICES; do
     nic_speed=${NIC_SPEEDS[$PCI]}
@@ -652,15 +790,23 @@ for PCI in $PCI_DEVICES; do
     if [ $nic_speed -ge 100000 ]; then
         nic_rx_desc=8192
         nic_tx_desc=8192
+        nic_rx_burst=64
+        nic_tx_burst=64
     elif [ $nic_speed -ge 40000 ]; then
         nic_rx_desc=4096
         nic_tx_desc=4096
+        nic_rx_burst=32
+        nic_tx_burst=32
     elif [ $nic_speed -ge 10000 ]; then
         nic_rx_desc=$RX_DESC
         nic_tx_desc=$TX_DESC
+        nic_rx_burst=32
+        nic_tx_burst=32
     else
         nic_rx_desc=1024
         nic_tx_desc=1024
+        nic_rx_burst=16
+        nic_tx_burst=16
     fi
     
     [ $nic_queues -gt $((WORKER_CORES / 2)) ] && nic_queues=$((WORKER_CORES / 2))
@@ -708,9 +854,6 @@ CPU_SECTION="cpu {\\
   main-core $MAIN_CORE\\
   corelist-workers $WORKER_LIST"
 
-[ $SKIP_CORES -gt 0 ] && CPU_SECTION="${CPU_SECTION}\\
-  skip-cores $SKIP_CORES"
-
 [ -n "$SCHEDULER_POLICY" ] && CPU_SECTION="${CPU_SECTION}\\
   scheduler-policy $SCHEDULER_POLICY\\
   scheduler-priority $SCHEDULER_PRIORITY"
@@ -725,32 +868,53 @@ $CPU_SECTION
 }" "$CONF"
 
 if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" ]; then
+    if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ]; then
+        FIB_HEAP="2G"
+        NAT_TRANSLATIONS=4194304
+        SESSION_BUCKETS=100000
+        SESSION_MEM="256M"
+        ACL_HEAP="1G"
+    else
+        FIB_HEAP="512M"
+        NAT_TRANSLATIONS=1048576
+        SESSION_BUCKETS=20000
+        SESSION_MEM="64M"
+        ACL_HEAP="512M"
+    fi
+    
     sed -i "/^logging {/i\\
+ip {\\
+  heap-size $FIB_HEAP\\
+}\\
+\\
+ip6 {\\
+  heap-size $FIB_HEAP\\
+}\\
+\\
 nat {\\
   endpoint-dependent\\
-  max translations per thread 1048576\\
+  max translations per thread $NAT_TRANSLATIONS\\
 }\\
 \\
 session {\\
   evt_qs_memfd_seg\\
   event-queue-length 16384\\
-  preallocated-sessions 1024\\
-  v4-session-table-buckets 20000\\
-  v4-session-table-memory 64M\\
-  v6-session-table-buckets 20000\\
-  v6-session-table-memory 64M\\
+  preallocated-sessions 4096\\
+  v4-session-table-buckets $SESSION_BUCKETS\\
+  v4-session-table-memory $SESSION_MEM\\
+  v6-session-table-buckets $SESSION_BUCKETS\\
+  v6-session-table-memory $SESSION_MEM\\
 }\\
 \\
 acl-plugin {\\
   use tuple merge 1\\
-  hash lookup heap size 512M\\
+  hash lookup heap size $ACL_HEAP\\
 }\\
 " "$CONF"
 fi
 
 if [ "$DEPLOYMENT_PROFILE" != "micro" ] && [ "$DEPLOYMENT_PROFILE" != "minimal" ]; then
-    IRQ_TARGET_CORE=0
-    [ $SKIP_CORES -eq 0 ] && [ $MAIN_CORE -eq 0 ] && IRQ_TARGET_CORE=1
+    IRQ_TARGET_CORE=$MAIN_CORE
     
     IRQ_SCRIPT="/usr/local/bin/vpp-irq-affinity.sh"
     
@@ -812,7 +976,7 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
                 node_end=${NUMA_CPUS_END[$node]}
                 
                 if [ $node -eq 0 ]; then
-                    iso_start=$((node_start + SKIP_CORES + 2))
+                    iso_start=$((node_start + 2))
                 else
                     iso_start=$((node_start + 1))
                 fi
@@ -823,7 +987,7 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
                 fi
             done
         else
-            iso_start=$((SKIP_CORES + 2))
+            iso_start=2
             iso_end=$((CPU_CORES - 1))
             [ $iso_start -lt $iso_end ] && ISOLATE_RANGES="${iso_start}-${iso_end}"
         fi
@@ -843,16 +1007,30 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
     fi
 fi
 
-echo ""
-echo "=== VPP Auto-Config Summary ==="
-echo "Profile: $DEPLOYMENT_PROFILE ($PROFILE_DESC)"
-echo "NUMA Nodes: $NUMA_NODES, CPU Sockets: $CPU_SOCKETS"
-echo "Workers: $WORKER_LIST (main-core: $MAIN_CORE)"
-echo "Socket-mem: $SOCKET_MEM_STR MB"
-echo "Buffers/NUMA: $BUFFERS_PER_NUMA"
-echo "Hugepages: $NR_HUGEPAGES ($(( NR_HUGEPAGES * 2 ))MB)"
-echo "NICs: $NIC_COUNT, Total bandwidth: ${TOTAL_BANDWIDTH}Mbps"
-[ $REBOOT_REQUIRED -eq 1 ] && echo "NOTE: Reboot required for CPU isolation"
-echo "=== Configuration complete at $(date) ==="
+ACTUAL_WORKERS=$(echo "$WORKER_LIST" | tr ',' '\n' | while read range; do
+    if echo "$range" | grep -q '-'; then
+        start=$(echo "$range" | cut -d'-' -f1)
+        end=$(echo "$range" | cut -d'-' -f2)
+        echo $((end - start + 1))
+    else
+        echo 1
+    fi
+done | awk '{sum+=$1} END {print sum}')
+
+echo "VPP Configuration Summary"
+echo "Profile: $DEPLOYMENT_PROFILE"
+if [ $HT_ENABLED -eq 1 ]; then
+    echo "CPU: $PHYSICAL_CORES physical ($LOGICAL_CORES logical), $NUMA_NODES NUMA, $CPU_SOCKETS socket(s)"
+else
+    echo "CPU: $CPU_CORES cores, $NUMA_NODES NUMA, $CPU_SOCKETS socket(s)"
+fi
+echo "Main: core $MAIN_CORE"
+echo "Workers: $WORKER_LIST ($ACTUAL_WORKERS)"
+echo "Memory: socket-mem $SOCKET_MEM_STR MB, heap ${HEAP_SIZE_MB}MB"
+echo "Buffers: $BUFFERS_PER_NUMA per-numa, hugepages $NR_HUGEPAGES"
+echo "NICs: $NIC_COUNT, bandwidth ${TOTAL_BANDWIDTH}Mbps"
+[ -n "$SCHEDULER_POLICY" ] && echo "Scheduler: $SCHEDULER_POLICY"
+[ $REBOOT_REQUIRED -eq 1 ] && echo "Note: Reboot required for CPU isolation"
+echo "Done at $(date)"
 
 exit 0
