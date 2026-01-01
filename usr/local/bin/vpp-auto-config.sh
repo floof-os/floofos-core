@@ -8,6 +8,7 @@ echo "FloofOS VPP auto-configuration started at $(date)"
 
 TEMPLATE="/etc/vpp/startup.conf.template"
 CONF="/etc/vpp/startup.conf"
+INTERFACE_MAP="/etc/vpp/interface-map.json"
 
 TOTAL_RAM=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 FREE_RAM=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
@@ -26,7 +27,6 @@ HT_ENABLED=0
 if [ $THREADS_PER_CORE -gt 1 ]; then
     HT_ENABLED=1
     CPU_CORES=$PHYSICAL_CORES
-    
     PHYSICAL_CORE_LIST=""
     if [ -d /sys/devices/system/cpu/cpu0/topology ]; then
         for cpu in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
@@ -59,53 +59,6 @@ echo "Hardware: $CPU_MODEL"
 echo "Sockets: $CPU_SOCKETS, NUMA nodes: $NUMA_NODES, Cores: $CPU_CORES"
 echo "RAM: ${TOTAL_RAM}MB, Features: $CPU_FEATURES"
 echo "Environment: $([ $IS_VM -eq 1 ] && echo 'Virtual Machine' || echo 'Bare Metal')"
-
-get_physical_cores_for_numa() {
-    local node=$1
-    local cores=""
-    
-    if [ $HT_ENABLED -eq 0 ]; then
-        if [ -f "/sys/devices/system/node/node${node}/cpulist" ]; then
-            cat /sys/devices/system/node/node${node}/cpulist
-        else
-            local start=$((node * (CPU_CORES / NUMA_NODES)))
-            local end=$(( (node + 1) * (CPU_CORES / NUMA_NODES) - 1 ))
-            echo "${start}-${end}"
-        fi
-        return
-    fi
-    
-    for cpu in /sys/devices/system/cpu/cpu[0-9]*/; do
-        local cpu_id=$(basename "$cpu" | sed 's/cpu//')
-        local cpu_numa=$(cat "$cpu/topology/physical_package_id" 2>/dev/null || echo "0")
-        
-        [ -f "/sys/devices/system/node/node${node}/cpulist" ] && {
-            local numa_cpus=$(cat /sys/devices/system/node/node${node}/cpulist)
-            if ! echo "$numa_cpus" | grep -qE "(^|,)${cpu_id}(,|$|-)" 2>/dev/null; then
-                echo "$numa_cpus" | tr ',' '\n' | while read range; do
-                    if echo "$range" | grep -q '-'; then
-                        local rs=$(echo "$range" | cut -d'-' -f1)
-                        local re=$(echo "$range" | cut -d'-' -f2)
-                        [ $cpu_id -ge $rs ] && [ $cpu_id -le $re ] || continue
-                    else
-                        [ "$range" = "$cpu_id" ] || continue
-                    fi
-                    break
-                done || continue
-            fi
-        }
-        
-        if [ -f "$cpu/topology/thread_siblings_list" ]; then
-            local first=$(cat "$cpu/topology/thread_siblings_list" | cut -d',' -f1 | cut -d'-' -f1)
-            if [ "$first" = "$cpu_id" ]; then
-                [ -n "$cores" ] && cores="$cores,"
-                cores="${cores}${cpu_id}"
-            fi
-        fi
-    done
-    
-    echo "$cores" | tr ',' '\n' | sort -n | tr '\n' ',' | sed 's/,$//'
-}
 
 declare -A NUMA_CPUS_START
 declare -A NUMA_CPUS_END
@@ -171,12 +124,24 @@ done
 get_pci_address() {
     local DEV_PATH="$1"
     local RESOLVED=$(readlink -f "$DEV_PATH")
-    
     if echo "$RESOLVED" | grep -qE '/virtio[0-9]+$'; then
         echo "$RESOLVED" | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]' | tail -1
     else
         basename "$RESOLVED"
     fi
+}
+
+get_pci_slot() {
+    local PCI="$1"
+    local bus=$(echo "$PCI" | cut -d':' -f2)
+    local devfn=$(echo "$PCI" | cut -d':' -f3)
+    local dev=$(echo "$devfn" | cut -d'.' -f1)
+    echo "$bus:$dev"
+}
+
+get_pci_function() {
+    local PCI="$1"
+    echo "$PCI" | cut -d'.' -f2
 }
 
 PCI_DEVICES=""
@@ -198,22 +163,28 @@ NIC_COUNT=$(echo "$PCI_DEVICES" | wc -w)
 declare -A NIC_SPEEDS
 declare -A NIC_NUMA
 declare -A NIC_QUEUES
+declare -A NIC_CARD_ID
+declare -A NIC_PORT_IDX
+declare -A NIC_VPP_NAME
+declare -A NIC_LINUX_NAME
+declare -A SLOT_TO_CARD
 MAX_NIC_SPEED=0
 TOTAL_BANDWIDTH=0
+NEXT_CARD_ID=1
 
 for PCI in $PCI_DEVICES; do
     NIC_NAME=$(lspci -s $PCI 2>/dev/null | grep -oE '(2\.5G|2500|10G|25G|40G|50G|100G|200G|400G)' | head -1)
     
     case "$NIC_NAME" in
-        *400G*) SPEED=400000 ;;
-        *200G*) SPEED=200000 ;;
-        *100G*) SPEED=100000 ;;
-        *50G*)  SPEED=50000 ;;
-        *40G*)  SPEED=40000 ;;
-        *25G*)  SPEED=25000 ;;
-        *10G*)  SPEED=10000 ;;
-        *2.5G*|*2500*) SPEED=2500 ;;
-        *)      SPEED=1000 ;;
+        *400G*) SPEED=400000; SPEED_PREFIX="400GE" ;;
+        *200G*) SPEED=200000; SPEED_PREFIX="200GE" ;;
+        *100G*) SPEED=100000; SPEED_PREFIX="100GE" ;;
+        *50G*)  SPEED=50000;  SPEED_PREFIX="50GE" ;;
+        *40G*)  SPEED=40000;  SPEED_PREFIX="40GE" ;;
+        *25G*)  SPEED=25000;  SPEED_PREFIX="25GE" ;;
+        *10G*)  SPEED=10000;  SPEED_PREFIX="10GE" ;;
+        *2.5G*|*2500*) SPEED=2500; SPEED_PREFIX="2.5GE" ;;
+        *)      SPEED=1000;   SPEED_PREFIX="GE" ;;
     esac
     
     NIC_SPEEDS[$PCI]=$SPEED
@@ -226,8 +197,29 @@ for PCI in $PCI_DEVICES; do
     fi
     [ "$numa_node" = "-1" ] && numa_node=0
     [ $numa_node -ge $NUMA_NODES ] && numa_node=0
-    
     NIC_NUMA[$PCI]=$numa_node
+    
+    pci_slot=$(get_pci_slot "$PCI")
+    pci_func=$(get_pci_function "$PCI")
+    
+    if [ -z "${SLOT_TO_CARD[$pci_slot]}" ]; then
+        bus_num=$(echo "$pci_slot" | cut -d':' -f1)
+        if [ "$bus_num" = "00" ]; then
+            SLOT_TO_CARD[$pci_slot]=0
+        else
+            SLOT_TO_CARD[$pci_slot]=$NEXT_CARD_ID
+            NEXT_CARD_ID=$((NEXT_CARD_ID + 1))
+        fi
+    fi
+    
+    NIC_CARD_ID[$PCI]=${SLOT_TO_CARD[$pci_slot]}
+    NIC_PORT_IDX[$PCI]=$pci_func
+    
+    NIC_VPP_NAME[$PCI]="${SPEED_PREFIX}${NIC_CARD_ID[$PCI]}/${numa_node}/${pci_func}"
+    
+    speed_lower=$(echo "$SPEED_PREFIX" | tr '[:upper:]' '[:lower:]')
+    NIC_LINUX_NAME[$PCI]="${speed_lower}-${NIC_CARD_ID[$PCI]}-${numa_node}-${pci_func}"
+    
     NUMA_NIC_COUNT[$numa_node]=$((${NUMA_NIC_COUNT[$numa_node]} + 1))
     NUMA_NIC_LIST[$numa_node]="${NUMA_NIC_LIST[$numa_node]} $PCI"
     NUMA_BANDWIDTH[$numa_node]=$((${NUMA_BANDWIDTH[$numa_node]} + SPEED))
@@ -244,7 +236,7 @@ for PCI in $PCI_DEVICES; do
         NIC_QUEUES[$PCI]=1
     fi
     
-    echo "NIC $PCI: ${SPEED}Mbps, NUMA $numa_node, Queues ${NIC_QUEUES[$PCI]}"
+    echo "NIC $PCI: ${NIC_VPP_NAME[$PCI]} (${SPEED}Mbps, NUMA $numa_node)"
 done
 
 echo "Total bandwidth: ${TOTAL_BANDWIDTH}Mbps across $NIC_COUNT NICs"
@@ -288,41 +280,16 @@ echo "Deployment Profile: $DEPLOYMENT_PROFILE ($PROFILE_DESC)"
 declare -A SOCKET_MEM
 
 for node in $(seq 0 $((NUMA_NODES-1))); do
-    node_nics="${NUMA_NIC_LIST[$node]}"
     node_bandwidth=${NUMA_BANDWIDTH[$node]}
     node_nic_count=${NUMA_NIC_COUNT[$node]}
     
     case "$DEPLOYMENT_PROFILE" in
-        micro)
-            base_mem=256
-            per_nic_mem=64
-            per_gbps_mem=1
-            ;;
-        minimal)
-            base_mem=512
-            per_nic_mem=128
-            per_gbps_mem=2
-            ;;
-        small)
-            base_mem=1024
-            per_nic_mem=256
-            per_gbps_mem=4
-            ;;
-        medium)
-            base_mem=2048
-            per_nic_mem=512
-            per_gbps_mem=8
-            ;;
-        large)
-            base_mem=4096
-            per_nic_mem=1024
-            per_gbps_mem=16
-            ;;
-        extreme)
-            base_mem=8192
-            per_nic_mem=2048
-            per_gbps_mem=32
-            ;;
+        micro)   base_mem=256; per_nic_mem=64; per_gbps_mem=1 ;;
+        minimal) base_mem=512; per_nic_mem=128; per_gbps_mem=2 ;;
+        small)   base_mem=1024; per_nic_mem=256; per_gbps_mem=4 ;;
+        medium)  base_mem=2048; per_nic_mem=512; per_gbps_mem=8 ;;
+        large)   base_mem=4096; per_nic_mem=1024; per_gbps_mem=16 ;;
+        extreme) base_mem=8192; per_nic_mem=2048; per_gbps_mem=32 ;;
     esac
     
     bandwidth_gb=$((node_bandwidth / 1000))
@@ -349,17 +316,13 @@ for node in $(seq 0 $((NUMA_NODES-1))); do
     SOCKET_MEM_STR="${SOCKET_MEM_STR}${SOCKET_MEM[$node]}"
 done
 
-echo "socket-mem: $SOCKET_MEM_STR"
-
 total_queues=0
 for PCI in $PCI_DEVICES; do
     total_queues=$((total_queues + ${NIC_QUEUES[$PCI]}))
 done
 
 bandwidth_gbps=$((TOTAL_BANDWIDTH / 1000))
-
 base_buffers=$((total_queues * 2048))
-
 bandwidth_buffers=$((bandwidth_gbps * 1024))
 
 if [ $MAX_NIC_SPEED -ge 100000 ]; then
@@ -397,18 +360,16 @@ BUFFERS_PER_NUMA=$power
 max_buffers=2097152
 [ $BUFFERS_PER_NUMA -gt $max_buffers ] && BUFFERS_PER_NUMA=$max_buffers
 
-echo "Buffers: $BUFFERS_PER_NUMA per-numa (queues: $total_queues, bw: ${bandwidth_gbps}Gbps)"
+echo "Buffers: $BUFFERS_PER_NUMA per-numa"
 
 case "$DEPLOYMENT_PROFILE" in
-    micro)     base_heap=256 ;;
-    minimal)   base_heap=512 ;;
-    small)     base_heap=1024 ;;
-    medium)    base_heap=2048 ;;
-    large)     base_heap=4096 ;;
-    extreme)   base_heap=8192 ;;
+    micro)   base_heap=256 ;;
+    minimal) base_heap=512 ;;
+    small)   base_heap=1024 ;;
+    medium)  base_heap=2048 ;;
+    large)   base_heap=4096 ;;
+    extreme) base_heap=8192 ;;
 esac
-
-worker_heap=$((WORKER_CORES * 128))
 
 if [ $MAX_NIC_SPEED -ge 100000 ]; then
     feature_heap=4096
@@ -420,7 +381,7 @@ else
     feature_heap=512
 fi
 
-HEAP_SIZE_MB=$((base_heap + worker_heap + feature_heap))
+HEAP_SIZE_MB=$((base_heap + feature_heap))
 
 power=1
 while [ $power -lt $HEAP_SIZE_MB ]; do
@@ -444,11 +405,15 @@ fi
 
 MAX_VPP_WORKERS=62
 if [ $WORKER_CORES -gt $MAX_VPP_WORKERS ]; then
-    echo "Note: Limiting workers from $WORKER_CORES to $MAX_VPP_WORKERS (VPP bitmap limit)"
+    echo "Note: Limiting workers from $WORKER_CORES to $MAX_VPP_WORKERS"
     WORKER_CORES=$MAX_VPP_WORKERS
 fi
 
 echo "CPU: $CPU_CORES cores, $NUMA_NODES NUMA, main=$MAIN_CORE, workers=$WORKER_CORES"
+
+declare -A WORKERS_PER_NUMA
+declare -A NUMA_WORKER_START
+declare -A NUMA_AVAILABLE_WORKERS
 
 if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
     total_bw=0
@@ -456,7 +421,6 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
         total_bw=$((total_bw + ${NUMA_BANDWIDTH[$node]}))
     done
     
-    declare -A WORKERS_PER_NUMA
     remaining_workers=$WORKER_CORES
     
     if [ $total_bw -eq 0 ]; then
@@ -487,14 +451,15 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
     fi
     
     for node in $(seq 0 $((NUMA_NODES-1))); do
-        echo "NUMA $node: ${WORKERS_PER_NUMA[$node]} workers, ${NUMA_BANDWIDTH[$node]}Mbps"
+        echo "NUMA $node: ${WORKERS_PER_NUMA[$node]} workers allocated"
     done
     
     WORKER_LIST=""
-    SKIPPED_CORES=""
+    current_worker_id=0
     
     if [ $HT_ENABLED -eq 1 ]; then
         for node in $(seq 0 $((NUMA_NODES-1))); do
+            NUMA_WORKER_START[$node]=$current_worker_id
             node_workers=${WORKERS_PER_NUMA[$node]}
             [ $node_workers -eq 0 ] && continue
             
@@ -502,8 +467,6 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
             core_array=($(echo "$phys_cores" | tr ',' ' '))
             
             skip_count=1
-            [ $node -gt 0 ] && SKIPPED_CORES="${SKIPPED_CORES} ${core_array[0]}"
-            
             added=0
             for core in "${core_array[@]}"; do
                 if [ $skip_count -gt 0 ]; then
@@ -514,10 +477,13 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
                 [ -n "$WORKER_LIST" ] && WORKER_LIST="${WORKER_LIST},"
                 WORKER_LIST="${WORKER_LIST}${core}"
                 added=$((added + 1))
+                current_worker_id=$((current_worker_id + 1))
             done
+            NUMA_AVAILABLE_WORKERS[$node]=$added
         done
     else
         for node in $(seq 0 $((NUMA_NODES-1))); do
+            NUMA_WORKER_START[$node]=$current_worker_id
             node_workers=${WORKERS_PER_NUMA[$node]}
             [ $node_workers -eq 0 ] && continue
             
@@ -528,11 +494,12 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
                 worker_start=$((node_start + 1))
             else
                 worker_start=$((node_start + 1))
-                SKIPPED_CORES="${SKIPPED_CORES} ${node_start}"
             fi
             
             worker_end=$((worker_start + node_workers - 1))
             [ $worker_end -gt $node_end ] && worker_end=$node_end
+            
+            actual_workers=$((worker_end - worker_start + 1))
             
             if [ $worker_start -le $worker_end ]; then
                 [ -n "$WORKER_LIST" ] && WORKER_LIST="${WORKER_LIST},"
@@ -541,13 +508,15 @@ if [ $NUMA_NODES -gt 1 ] && [ $IS_VM -eq 0 ]; then
                 else
                     WORKER_LIST="${WORKER_LIST}${worker_start}-${worker_end}"
                 fi
+                current_worker_id=$((current_worker_id + actual_workers))
             fi
+            NUMA_AVAILABLE_WORKERS[$node]=$actual_workers
         done
     fi
-    
-    echo "Workers: $WORKER_LIST (physical cores only)"
-    [ -n "$SKIPPED_CORES" ] && echo "Skipped:$SKIPPED_CORES"
+    echo "Workers: $WORKER_LIST"
 else
+    NUMA_WORKER_START[0]=0
+    
     if [ $HT_ENABLED -eq 1 ]; then
         phys_cores="${NUMA_PHYSICAL_CORES[0]}"
         core_array=($(echo "$phys_cores" | tr ',' ' '))
@@ -561,6 +530,7 @@ else
             WORKER_LIST="${WORKER_LIST}${core}"
             added=$((added + 1))
         done
+        NUMA_AVAILABLE_WORKERS[0]=$added
     else
         worker_start=$((MAIN_CORE + 1))
         worker_end=$((worker_start + WORKER_CORES - 1))
@@ -570,10 +540,82 @@ else
         else
             WORKER_LIST="${worker_start}-${worker_end}"
         fi
+        NUMA_AVAILABLE_WORKERS[0]=$WORKER_CORES
     fi
-    
+    WORKERS_PER_NUMA[0]=$WORKER_CORES
     echo "Workers: $WORKER_LIST"
 fi
+
+get_ideal_workers() {
+    local speed=$1
+    case $speed in
+        400000) echo 16 ;;
+        200000) echo 12 ;;
+        100000) echo 8 ;;
+        50000)  echo 6 ;;
+        40000)  echo 4 ;;
+        25000)  echo 2 ;;
+        10000)  echo 1 ;;
+        2500)   echo 1 ;;
+        *)      echo 0 ;;
+    esac
+}
+
+declare -A NUMA_NEXT_WORKER
+declare -A NUMA_1G_WORKER
+for node in $(seq 0 $((NUMA_NODES-1))); do
+    NUMA_NEXT_WORKER[$node]=${NUMA_WORKER_START[$node]}
+    NUMA_1G_WORKER[$node]=-1
+done
+
+declare -A NIC_WORKER_LIST
+
+for PCI in $PCI_DEVICES; do
+    nic_speed=${NIC_SPEEDS[$PCI]}
+    nic_numa=${NIC_NUMA[$PCI]}
+    
+    ideal_workers=$(get_ideal_workers $nic_speed)
+    available=${NUMA_AVAILABLE_WORKERS[$nic_numa]}
+    next_worker=${NUMA_NEXT_WORKER[$nic_numa]}
+    numa_start=${NUMA_WORKER_START[$nic_numa]}
+    numa_end=$((numa_start + available - 1))
+    
+    if [ $nic_speed -le 1000 ]; then
+        if [ ${NUMA_1G_WORKER[$nic_numa]} -eq -1 ]; then
+            if [ $next_worker -le $numa_end ]; then
+                NUMA_1G_WORKER[$nic_numa]=$next_worker
+                NUMA_NEXT_WORKER[$nic_numa]=$((next_worker + 1))
+            fi
+        fi
+        NIC_WORKER_LIST[$PCI]="${NUMA_1G_WORKER[$nic_numa]}"
+    else
+        remaining=$((numa_end - next_worker + 1))
+        [ $remaining -lt 0 ] && remaining=0
+        
+        if [ $ideal_workers -gt $remaining ]; then
+            actual_workers=$remaining
+            echo "WARNING: ${NIC_VPP_NAME[$PCI]} assigned $actual_workers workers (ideal: $ideal_workers)"
+        else
+            actual_workers=$ideal_workers
+        fi
+        
+        if [ $actual_workers -gt 0 ]; then
+            worker_end=$((next_worker + actual_workers - 1))
+            if [ $next_worker -eq $worker_end ]; then
+                NIC_WORKER_LIST[$PCI]="$next_worker"
+            else
+                NIC_WORKER_LIST[$PCI]="${next_worker}-${worker_end}"
+            fi
+            NUMA_NEXT_WORKER[$nic_numa]=$((worker_end + 1))
+        else
+            NIC_WORKER_LIST[$PCI]=""
+        fi
+    fi
+    
+    workers_str=${NIC_WORKER_LIST[$PCI]}
+    [ -z "$workers_str" ] && workers_str="none"
+    echo "Interface ${NIC_VPP_NAME[$PCI]}: workers $workers_str"
+done
 
 case "$DEPLOYMENT_PROFILE" in
     micro)   base_statseg=64 ;;
@@ -600,8 +642,6 @@ STATSEG_SIZE=$power
 max_statseg=4096
 [ $STATSEG_SIZE -gt $max_statseg ] && STATSEG_SIZE=$max_statseg
 
-echo "Statseg: ${STATSEG_SIZE}MB"
-
 BUFFER_SIZE_BYTES=2176
 BUFFER_MEM_MB=$(( (BUFFERS_PER_NUMA * BUFFER_SIZE_BYTES * NUMA_NODES) / (1024 * 1024) ))
 
@@ -615,8 +655,6 @@ OVERHEAD_PERCENT=25
 BASE_MEM=$((HEAP_SIZE_MB + BUFFER_MEM_MB + STATSEG_SIZE + API_MEM + total_socket_mem))
 OVERHEAD_MB=$(( (BASE_MEM * OVERHEAD_PERCENT) / 100 ))
 TOTAL_HUGE_MEM_MB=$((BASE_MEM + OVERHEAD_MB))
-
-echo "Memory: ${TOTAL_HUGE_MEM_MB}MB total (heap ${HEAP_SIZE_MB}MB, buffers ${BUFFER_MEM_MB}MB, socket-mem ${total_socket_mem}MB)"
 
 NR_HUGEPAGES=$((TOTAL_HUGE_MEM_MB / 2))
 
@@ -639,8 +677,6 @@ while [ $power -lt $NR_HUGEPAGES ]; do
     power=$((power * 2))
 done
 NR_HUGEPAGES=$power
-
-echo "Hugepages: $NR_HUGEPAGES ($(( NR_HUGEPAGES * 2 ))MB)"
 
 VM_MAX_MAP_COUNT=$((NR_HUGEPAGES * 3 + 2048))
 [ $VM_MAX_MAP_COUNT -lt 65536 ] && VM_MAX_MAP_COUNT=65536
@@ -771,6 +807,8 @@ for PCI in $PCI_DEVICES; do
     bind_to_dpdk "$PCI"
 done
 
+[ -f "$CONF" ] && cp "$CONF" "${CONF}.backup.$(date +%Y%m%d%H%M%S)"
+
 cp "$TEMPLATE" "$CONF"
 
 if [ $IS_VM -eq 1 ]; then
@@ -781,95 +819,96 @@ NUM_MBUFS=$((BUFFERS_PER_NUMA * NUMA_NODES * 2))
 [ $NUM_MBUFS -lt 65536 ] && NUM_MBUFS=65536
 [ $NUM_MBUFS -gt 1048576 ] && NUM_MBUFS=1048576
 
-if [ $IS_VM -eq 1 ]; then
-    sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR/" "$CONF"
-else
-    sed -i "s/^dpdk {.*/dpdk {\n  socket-mem $SOCKET_MEM_STR\n  num-mbufs $NUM_MBUFS/" "$CONF"
-fi
+DPDK_SECTION="dpdk {\n  socket-mem $SOCKET_MEM_STR"
+[ $IS_VM -eq 0 ] && DPDK_SECTION="${DPDK_SECTION}\n  num-mbufs $NUM_MBUFS"
 
 for PCI in $PCI_DEVICES; do
     nic_speed=${NIC_SPEEDS[$PCI]}
-    nic_queues=${NIC_QUEUES[$PCI]}
+    nic_name=${NIC_VPP_NAME[$PCI]}
+    nic_workers=${NIC_WORKER_LIST[$PCI]}
     
     if [ $nic_speed -ge 100000 ]; then
         nic_rx_desc=8192
         nic_tx_desc=8192
-        nic_rx_burst=64
-        nic_tx_burst=64
+        nic_queues=16
     elif [ $nic_speed -ge 40000 ]; then
         nic_rx_desc=4096
         nic_tx_desc=4096
-        nic_rx_burst=32
-        nic_tx_burst=32
+        nic_queues=8
     elif [ $nic_speed -ge 10000 ]; then
         nic_rx_desc=$RX_DESC
         nic_tx_desc=$TX_DESC
-        nic_rx_burst=32
-        nic_tx_burst=32
+        nic_queues=4
+    elif [ $nic_speed -ge 2500 ]; then
+        nic_rx_desc=2048
+        nic_tx_desc=2048
+        nic_queues=2
     else
         nic_rx_desc=1024
         nic_tx_desc=1024
-        nic_rx_burst=16
-        nic_tx_burst=16
+        nic_queues=1
     fi
     
-    [ $nic_queues -gt $((WORKER_CORES / 2)) ] && nic_queues=$((WORKER_CORES / 2))
+    if [ -n "$nic_workers" ] && [ "$nic_workers" != "-1" ]; then
+        worker_count=0
+        if echo "$nic_workers" | grep -q "-"; then
+            w_start=$(echo "$nic_workers" | cut -d'-' -f1)
+            w_end=$(echo "$nic_workers" | cut -d'-' -f2)
+            worker_count=$((w_end - w_start + 1))
+        else
+            worker_count=1
+        fi
+        [ $nic_queues -gt $worker_count ] && nic_queues=$worker_count
+    fi
+    
     [ $nic_queues -lt 1 ] && nic_queues=1
     
-    sed -i "/socket-mem/a\\
-  dev $PCI {\\
-    num-rx-queues $nic_queues\\
-    num-tx-queues $nic_queues\\
-    num-rx-desc $nic_rx_desc\\
-    num-tx-desc $nic_tx_desc\\
-  }" "$CONF"
+    DPDK_SECTION="${DPDK_SECTION}\n  dev $PCI {"
+    DPDK_SECTION="${DPDK_SECTION}\n    name $nic_name"
+    [ -n "$nic_workers" ] && [ "$nic_workers" != "-1" ] && DPDK_SECTION="${DPDK_SECTION}\n    workers $nic_workers"
+    DPDK_SECTION="${DPDK_SECTION}\n    num-rx-queues $nic_queues"
+    DPDK_SECTION="${DPDK_SECTION}\n    num-tx-queues $nic_queues"
+    DPDK_SECTION="${DPDK_SECTION}\n    num-rx-desc $nic_rx_desc"
+    DPDK_SECTION="${DPDK_SECTION}\n    num-tx-desc $nic_tx_desc"
+    DPDK_SECTION="${DPDK_SECTION}\n  }"
 done
 
-sed -i "/^socksvr {/,/^}/ {
-  /^}/a\\
-\\
-statseg {\\
-  size ${STATSEG_SIZE}M\\
-  page-size default-hugepage\\
-  per-node-counters on\\
+DPDK_SECTION="${DPDK_SECTION}\n}"
+
+sed -i "s/^dpdk {.*$/DPDK_PLACEHOLDER/" "$CONF"
+sed -i '/^DPDK_PLACEHOLDER$/,/^}$/d' "$CONF"
+echo -e "$DPDK_SECTION" >> "$CONF"
+
+cat >> "$CONF" <<EOF
+
+statseg {
+  size ${STATSEG_SIZE}M
+  page-size default-hugepage
+  per-node-counters on
 }
-}" "$CONF"
 
-sed -i "/^socksvr {/,/^}/ {
-  /^}/a\\
-\\
-buffers {\\
-  buffers-per-numa ${BUFFERS_PER_NUMA}\\
-  default data-size 2048\\
-  page-size default-hugepage\\
+buffers {
+  buffers-per-numa ${BUFFERS_PER_NUMA}
+  default data-size 2048
+  page-size default-hugepage
 }
-}" "$CONF"
 
-sed -i "/^socksvr {/,/^}/ {
-  /^}/a\\
-\\
-memory {\\
-  main-heap-size ${HEAP_SIZE_MB}M\\
-  main-heap-page-size default-hugepage\\
+memory {
+  main-heap-size ${HEAP_SIZE_MB}M
+  main-heap-page-size default-hugepage
 }
-}" "$CONF"
 
-CPU_SECTION="cpu {\\
-  main-core $MAIN_CORE\\
-  corelist-workers $WORKER_LIST"
+cpu {
+  main-core $MAIN_CORE
+  corelist-workers $WORKER_LIST
+EOF
 
-[ -n "$SCHEDULER_POLICY" ] && CPU_SECTION="${CPU_SECTION}\\
-  scheduler-policy $SCHEDULER_POLICY\\
-  scheduler-priority $SCHEDULER_PRIORITY"
+[ -n "$SCHEDULER_POLICY" ] && cat >> "$CONF" <<EOF
+  scheduler-policy $SCHEDULER_POLICY
+  scheduler-priority $SCHEDULER_PRIORITY
+EOF
 
-CPU_SECTION="${CPU_SECTION}\\
-}"
-
-sed -i "/^socksvr {/,/^}/ {
-  /^}/a\\
-\\
-$CPU_SECTION
-}" "$CONF"
+echo "}" >> "$CONF"
 
 if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" ]; then
     if [ $IS_VM -eq 1 ]; then
@@ -986,6 +1025,30 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
     fi
 fi
 
+echo "{"
+echo "  \"generated\": \"$(date -Iseconds)\","
+echo "  \"interfaces\": ["
+first=1
+for PCI in $PCI_DEVICES; do
+    [ $first -eq 0 ] && echo ","
+    first=0
+    echo "    {"
+    echo "      \"pci\": \"$PCI\","
+    echo "      \"vpp_name\": \"${NIC_VPP_NAME[$PCI]}\","
+    echo "      \"linux_name\": \"${NIC_LINUX_NAME[$PCI]}\","
+    echo "      \"speed\": ${NIC_SPEEDS[$PCI]},"
+    echo "      \"numa\": ${NIC_NUMA[$PCI]},"
+    echo "      \"card_id\": ${NIC_CARD_ID[$PCI]},"
+    echo "      \"port_idx\": ${NIC_PORT_IDX[$PCI]},"
+    workers_json=${NIC_WORKER_LIST[$PCI]}
+    [ -z "$workers_json" ] && workers_json="null" || workers_json="\"$workers_json\""
+    echo "      \"workers\": $workers_json"
+    echo -n "    }"
+done
+echo ""
+echo "  ]"
+echo "}" > "$INTERFACE_MAP"
+
 ACTUAL_WORKERS=$(echo "$WORKER_LIST" | tr ',' '\n' | while read range; do
     if echo "$range" | grep -q '-'; then
         start=$(echo "$range" | cut -d'-' -f1)
@@ -996,18 +1059,22 @@ ACTUAL_WORKERS=$(echo "$WORKER_LIST" | tr ',' '\n' | while read range; do
     fi
 done | awk '{sum+=$1} END {print sum}')
 
+echo ""
 echo "VPP Configuration Summary"
 echo "Profile: $DEPLOYMENT_PROFILE"
 if [ $HT_ENABLED -eq 1 ]; then
-    echo "CPU: $PHYSICAL_CORES physical ($LOGICAL_CORES logical), $NUMA_NODES NUMA, $CPU_SOCKETS socket(s)"
+    echo "CPU: $PHYSICAL_CORES physical ($LOGICAL_CORES logical), $NUMA_NODES NUMA"
 else
-    echo "CPU: $CPU_CORES cores, $NUMA_NODES NUMA, $CPU_SOCKETS socket(s)"
+    echo "CPU: $CPU_CORES cores, $NUMA_NODES NUMA"
 fi
 echo "Main: core $MAIN_CORE"
-echo "Workers: $WORKER_LIST ($ACTUAL_WORKERS)"
+echo "Workers: $WORKER_LIST ($ACTUAL_WORKERS total)"
 echo "Memory: socket-mem $SOCKET_MEM_STR MB, heap ${HEAP_SIZE_MB}MB"
 echo "Buffers: $BUFFERS_PER_NUMA per-numa, hugepages $NR_HUGEPAGES"
-echo "NICs: $NIC_COUNT, bandwidth ${TOTAL_BANDWIDTH}Mbps"
+echo "NICs: $NIC_COUNT interfaces"
+for PCI in $PCI_DEVICES; do
+    echo "  ${NIC_VPP_NAME[$PCI]} -> ${NIC_LINUX_NAME[$PCI]} (workers: ${NIC_WORKER_LIST[$PCI]:-shared})"
+done
 [ -n "$SCHEDULER_POLICY" ] && echo "Scheduler: $SCHEDULER_POLICY"
 [ $REBOOT_REQUIRED -eq 1 ] && echo "Note: Reboot required for CPU isolation"
 echo "Done at $(date)"
