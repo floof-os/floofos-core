@@ -202,17 +202,20 @@ for PCI in $PCI_DEVICES; do
     pci_slot=$(get_pci_slot "$PCI")
     pci_func=$(get_pci_function "$PCI")
     
-    if [ -z "${SLOT_TO_CARD[$pci_slot]}" ]; then
-        bus_num=$(echo "$pci_slot" | cut -d':' -f1)
-        if [ "$bus_num" = "00" ]; then
-            SLOT_TO_CARD[$pci_slot]=0
-        else
+    bus_num=$(echo "$pci_slot" | cut -d':' -f1)
+    dev_num=$(echo "$pci_slot" | cut -d':' -f2)
+    dev_num_dec=$((16#$dev_num))
+    
+    if [ "$bus_num" = "00" ]; then
+        NIC_CARD_ID[$PCI]=$dev_num_dec
+    else
+        if [ -z "${SLOT_TO_CARD[$pci_slot]}" ]; then
             SLOT_TO_CARD[$pci_slot]=$NEXT_CARD_ID
             NEXT_CARD_ID=$((NEXT_CARD_ID + 1))
         fi
+        NIC_CARD_ID[$PCI]=${SLOT_TO_CARD[$pci_slot]}
     fi
     
-    NIC_CARD_ID[$PCI]=${SLOT_TO_CARD[$pci_slot]}
     NIC_PORT_IDX[$PCI]=$pci_func
     
     NIC_VPP_NAME[$PCI]="${SPEED_PREFIX}${NIC_CARD_ID[$PCI]}/${numa_node}/${pci_func}"
@@ -809,18 +812,46 @@ done
 
 [ -f "$CONF" ] && cp "$CONF" "${CONF}.backup.$(date +%Y%m%d%H%M%S)"
 
+NUM_MBUFS=$((BUFFERS_PER_NUMA * NUMA_NODES * 2))
+[ $NUM_MBUFS -lt 65536 ] && NUM_MBUFS=65536
+[ $NUM_MBUFS -gt 1048576 ] && NUM_MBUFS=1048576
+
 cp "$TEMPLATE" "$CONF"
 
 if [ $IS_VM -eq 1 ]; then
     sed -i '/gid vpp/a\  poll-sleep-usec 100' "$CONF"
 fi
 
-NUM_MBUFS=$((BUFFERS_PER_NUMA * NUMA_NODES * 2))
-[ $NUM_MBUFS -lt 65536 ] && NUM_MBUFS=65536
-[ $NUM_MBUFS -gt 1048576 ] && NUM_MBUFS=1048576
+CPU_SECTION="cpu {
+  main-core $MAIN_CORE
+  corelist-workers $WORKER_LIST"
+[ -n "$SCHEDULER_POLICY" ] && CPU_SECTION="$CPU_SECTION
+  scheduler-policy $SCHEDULER_POLICY
+  scheduler-priority $SCHEDULER_PRIORITY"
+CPU_SECTION="$CPU_SECTION
+}"
 
-DPDK_SECTION="dpdk {\n  socket-mem $SOCKET_MEM_STR"
-[ $IS_VM -eq 0 ] && DPDK_SECTION="${DPDK_SECTION}\n  num-mbufs $NUM_MBUFS"
+MEMORY_SECTION="memory {
+  main-heap-size ${HEAP_SIZE_MB}M
+  main-heap-page-size default-hugepage
+}"
+
+STATSEG_SECTION="statseg {
+  size ${STATSEG_SIZE}M
+  page-size default-hugepage
+  per-node-counters on
+}"
+
+BUFFERS_SECTION="buffers {
+  buffers-per-numa ${BUFFERS_PER_NUMA}
+  default data-size 2048
+  page-size default-hugepage
+}"
+
+DPDK_SECTION="dpdk {
+  socket-mem $SOCKET_MEM_STR"
+[ $IS_VM -eq 0 ] && DPDK_SECTION="$DPDK_SECTION
+  num-mbufs $NUM_MBUFS"
 
 for PCI in $PCI_DEVICES; do
     nic_speed=${NIC_SPEEDS[$PCI]}
@@ -863,52 +894,49 @@ for PCI in $PCI_DEVICES; do
     
     [ $nic_queues -lt 1 ] && nic_queues=1
     
-    DPDK_SECTION="${DPDK_SECTION}\n  dev $PCI {"
-    DPDK_SECTION="${DPDK_SECTION}\n    name $nic_name"
-    [ -n "$nic_workers" ] && [ "$nic_workers" != "-1" ] && DPDK_SECTION="${DPDK_SECTION}\n    workers $nic_workers"
-    DPDK_SECTION="${DPDK_SECTION}\n    num-rx-queues $nic_queues"
-    DPDK_SECTION="${DPDK_SECTION}\n    num-tx-queues $nic_queues"
-    DPDK_SECTION="${DPDK_SECTION}\n    num-rx-desc $nic_rx_desc"
-    DPDK_SECTION="${DPDK_SECTION}\n    num-tx-desc $nic_tx_desc"
-    DPDK_SECTION="${DPDK_SECTION}\n  }"
+    DPDK_SECTION="$DPDK_SECTION
+  dev $PCI {
+    name $nic_name"
+    [ -n "$nic_workers" ] && [ "$nic_workers" != "-1" ] && DPDK_SECTION="$DPDK_SECTION
+    workers $nic_workers"
+    DPDK_SECTION="$DPDK_SECTION
+    num-rx-queues $nic_queues
+    num-tx-queues $nic_queues
+    num-rx-desc $nic_rx_desc
+    num-tx-desc $nic_tx_desc
+  }"
 done
 
-DPDK_SECTION="${DPDK_SECTION}\n}"
+DPDK_SECTION="$DPDK_SECTION
+}"
 
-sed -i "s/^dpdk {.*$/DPDK_PLACEHOLDER/" "$CONF"
-sed -i '/^DPDK_PLACEHOLDER$/,/^}$/d' "$CONF"
-echo -e "$DPDK_SECTION" >> "$CONF"
+DYNAMIC_SECTIONS="$CPU_SECTION
 
-cat >> "$CONF" <<EOF
+$MEMORY_SECTION
 
-statseg {
-  size ${STATSEG_SIZE}M
-  page-size default-hugepage
-  per-node-counters on
+$STATSEG_SECTION
+
+$BUFFERS_SECTION
+"
+
+TEMP_FILE=$(mktemp)
+awk -v insert="$DYNAMIC_SECTIONS" '
+/^dpdk \{/ { print insert }
+{ print }
+' "$CONF" > "$TEMP_FILE"
+mv "$TEMP_FILE" "$CONF"
+
+TEMP_FILE=$(mktemp)
+awk -v replacement="$DPDK_SECTION" '
+/^dpdk \{/,/^\}/ {
+    if (/^dpdk \{/) { print replacement; skip=1 }
+    if (/^\}/ && skip) { skip=0; next }
+    if (skip) next
+    next
 }
-
-buffers {
-  buffers-per-numa ${BUFFERS_PER_NUMA}
-  default data-size 2048
-  page-size default-hugepage
-}
-
-memory {
-  main-heap-size ${HEAP_SIZE_MB}M
-  main-heap-page-size default-hugepage
-}
-
-cpu {
-  main-core $MAIN_CORE
-  corelist-workers $WORKER_LIST
-EOF
-
-[ -n "$SCHEDULER_POLICY" ] && cat >> "$CONF" <<EOF
-  scheduler-policy $SCHEDULER_POLICY
-  scheduler-priority $SCHEDULER_PRIORITY
-EOF
-
-echo "}" >> "$CONF"
+{ print }
+' "$CONF" > "$TEMP_FILE"
+mv "$TEMP_FILE" "$CONF"
 
 if [ "$DEPLOYMENT_PROFILE" != "minimal" ] && [ "$DEPLOYMENT_PROFILE" != "micro" ]; then
     if [ $IS_VM -eq 1 ]; then

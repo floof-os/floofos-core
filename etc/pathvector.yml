@@ -122,7 +122,7 @@ templates:
     filter-irr: false
     filter-rpki: false
     remove-all-communities: 65000
-#    rr-client: true
+    #rr-client: true
 
 #-------------------------------------------------------------------
 # PEERS CONFIGURATION
@@ -172,7 +172,7 @@ templates:
 #    multihop: 2
 
 #-------------------------------------------------------------------
-# OPTIONAL: Static default route for traceroute
+# OPTIONAL: Static default route for Traceroute/Management/etc.
 # Uncomment if needed (preference 80 = lower than BGP)
 #-------------------------------------------------------------------
 #
