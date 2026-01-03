@@ -204,10 +204,11 @@ for PCI in $PCI_DEVICES; do
     
     bus_num=$(echo "$pci_slot" | cut -d':' -f1)
     dev_num=$(echo "$pci_slot" | cut -d':' -f2)
-    dev_num_dec=$((16#$dev_num))
     
     if [ "$bus_num" = "00" ]; then
-        NIC_CARD_ID[$PCI]=$dev_num_dec
+        dev_num_raw=$(echo "$dev_num" | sed 's/^0*//')
+        [ -z "$dev_num_raw" ] && dev_num_raw=0
+        NIC_CARD_ID[$PCI]=$dev_num_raw
     else
         if [ -z "${SLOT_TO_CARD[$pci_slot]}" ]; then
             SLOT_TO_CARD[$pci_slot]=$NEXT_CARD_ID
@@ -1053,29 +1054,34 @@ if [ "$DEPLOYMENT_PROFILE" = "large" ] || [ "$DEPLOYMENT_PROFILE" = "extreme" ];
     fi
 fi
 
-echo "{"
-echo "  \"generated\": \"$(date -Iseconds)\","
-echo "  \"interfaces\": ["
-first=1
-for PCI in $PCI_DEVICES; do
-    [ $first -eq 0 ] && echo ","
-    first=0
-    echo "    {"
-    echo "      \"pci\": \"$PCI\","
-    echo "      \"vpp_name\": \"${NIC_VPP_NAME[$PCI]}\","
-    echo "      \"linux_name\": \"${NIC_LINUX_NAME[$PCI]}\","
-    echo "      \"speed\": ${NIC_SPEEDS[$PCI]},"
-    echo "      \"numa\": ${NIC_NUMA[$PCI]},"
-    echo "      \"card_id\": ${NIC_CARD_ID[$PCI]},"
-    echo "      \"port_idx\": ${NIC_PORT_IDX[$PCI]},"
-    workers_json=${NIC_WORKER_LIST[$PCI]}
-    [ -z "$workers_json" ] && workers_json="null" || workers_json="\"$workers_json\""
-    echo "      \"workers\": $workers_json"
-    echo -n "    }"
-done
-echo ""
-echo "  ]"
-echo "}" > "$INTERFACE_MAP"
+{
+    echo "{"
+    echo "  \"generated\": \"$(date -Iseconds)\","
+    echo "  \"interfaces\": ["
+    first=1
+    for PCI in $PCI_DEVICES; do
+        [ $first -eq 0 ] && echo "    ,"
+        first=0
+        workers_json=${NIC_WORKER_LIST[$PCI]}
+        [ -z "$workers_json" ] && workers_json="null" || workers_json="\"$workers_json\""
+        cat <<EOFJSON
+    {
+      "pci": "$PCI",
+      "vpp_name": "${NIC_VPP_NAME[$PCI]}",
+      "linux_name": "${NIC_LINUX_NAME[$PCI]}",
+      "speed": ${NIC_SPEEDS[$PCI]},
+      "numa": ${NIC_NUMA[$PCI]},
+      "card_id": ${NIC_CARD_ID[$PCI]},
+      "port_idx": ${NIC_PORT_IDX[$PCI]},
+      "workers": $workers_json
+    }
+EOFJSON
+    done
+    echo "  ]"
+    echo "}"
+} > "$INTERFACE_MAP"
+
+echo "Interface map written to $INTERFACE_MAP"
 
 ACTUAL_WORKERS=$(echo "$WORKER_LIST" | tr ',' '\n' | while read range; do
     if echo "$range" | grep -q '-'; then
