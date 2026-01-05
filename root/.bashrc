@@ -7,7 +7,7 @@
 
 export PATH=$PATH:/usr/local/go/bin
 
-export PS1='floofos@\h:\w\$ '
+PS1='\u@\h:\w\$ '
 
 if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
