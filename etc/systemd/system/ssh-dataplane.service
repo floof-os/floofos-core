@@ -11,11 +11,15 @@ After=network.target netns-dataplane.service
 Requires=netns-dataplane.service
 
 [Service]
-ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/sshd -oPidFile=/run/sshd-dataplane.pid
-Type=forking
+ExecStart=/usr/sbin/ip netns exec dataplane /usr/sbin/sshd -D
+Type=simple
 KillMode=process
 Restart=on-failure
-RestartSec=10s
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+StandardOutput=null
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
