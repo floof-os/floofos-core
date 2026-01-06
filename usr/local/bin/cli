@@ -22,13 +22,13 @@ if [ ! -f /var/run/netns/dataplane ]; then
 fi
 
 if [ -n "$FLOOFCTL_SHELL" ]; then
-    CLI_SESSION=1
+    export FLOOFOS_CLI_SESSION=1
 else
-    CLI_SESSION=0
+    export FLOOFOS_CLI_SESSION=0
 fi
 
 if [ "$(id -u)" -eq 0 ]; then
-    FLOOFOS_CLI_SESSION="$CLI_SESSION" /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
+    /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
 else
-    sudo SUDO_USER="$USER" FLOOFOS_CLI_SESSION="$CLI_SESSION" /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
+    sudo SUDO_USER="$USER" /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
 fi

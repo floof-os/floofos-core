@@ -7,15 +7,14 @@
 
 export PATH=$PATH:/usr/local/go/bin
 
-export PS1='floofos@\h:\w\$ '
+PS1='\u@\h:\w\$ '
 
 if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
 fi
 
 if [[ -t 0 && -z "$FLOOFCTL_SHELL" ]]; then
-    export FLOOFCTL_SHELL=1
     if [ -x /usr/local/bin/cli ]; then
-        exec /usr/local/bin/cli
+        /usr/local/bin/cli || echo "CLI exited, returning to shell"
     fi
 fi
