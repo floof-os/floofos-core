@@ -6,6 +6,7 @@
 # the Free Software Foundation, either version 3 of the License.
 
 export PATH=$PATH:/usr/local/go/bin
+export FLOOFOS_CLI_SESSION=1
 
 PS1='\u@\h:\w\$ '
 
