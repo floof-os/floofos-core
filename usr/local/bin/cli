@@ -30,5 +30,5 @@ fi
 if [ "$(id -u)" -eq 0 ]; then
     /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
 else
-    sudo SUDO_USER="$USER" /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
+    sudo /sbin/ip netns exec dataplane /usr/bin/floof-cli "$@"
 fi
