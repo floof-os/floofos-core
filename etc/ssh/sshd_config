@@ -30,6 +30,7 @@ UsePAM yes
 
 X11Forwarding no
 PrintMotd no
+PrintLastLog no
 
 AcceptEnv LANG LC_*
 
