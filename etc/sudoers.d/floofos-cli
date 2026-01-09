@@ -1,10 +1,8 @@
 # FloofOS CLI sudo permissions
 # Allow floofos user to run CLI in dataplane namespace without password
 
-Defaults env_keep += "FLOOFOS_CLI_SESSION FLOOFCTL_SHELL"
-
-floofos ALL=(ALL) NOPASSWD:SETENV: /sbin/ip netns exec dataplane /usr/bin/floof-cli *
-floofos ALL=(ALL) NOPASSWD:SETENV: /sbin/ip netns exec dataplane /usr/bin/floof-cli
+floofos ALL=(ALL) NOPASSWD: /sbin/ip netns exec dataplane /usr/bin/floof-cli *
+floofos ALL=(ALL) NOPASSWD: /sbin/ip netns exec dataplane /usr/bin/floof-cli
 floofos ALL=(ALL) NOPASSWD: /usr/bin/vppctl *
 floofos ALL=(ALL) NOPASSWD: /usr/sbin/birdc *
 floofos ALL=(ALL) NOPASSWD: /etc/vppcfg/.venv/bin/vppcfg *
