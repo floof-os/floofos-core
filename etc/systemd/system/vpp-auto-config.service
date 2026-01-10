@@ -13,7 +13,7 @@ Before=vpp.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/vpp-auto-config.sh
+ExecStart=/usr/sbin/vpp-auto-config
 RemainAfterExit=yes
 
 [Install]

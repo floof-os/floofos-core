@@ -8,7 +8,7 @@ Wants=systemd-modules-load.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/vpp-dpdk-bind.sh
+ExecStart=/usr/sbin/vpp-dpdk-bind
 
 [Install]
 WantedBy=sysinit.target
