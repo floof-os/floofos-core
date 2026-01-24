@@ -11,7 +11,7 @@ set -e
 
 DISK=""
 HOSTNAME="floofos"
-CONSOLE="kvm"
+CONSOLE="serial"
 PASSWORD=""
 PRESERVE_CONFIG="false"
 CONFIG_COMMIT="-1"
