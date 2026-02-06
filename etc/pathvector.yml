@@ -1,15 +1,5 @@
-# FloofOS BGP Configuration
-# 
-# Configure BGP using CLI commands:
-#   set bgp asn <number>
-#   set bgp router-id <ip>
-#   set bgp prefixes <cidr>
-#   set bgp policy <name> ...
-#   set bgp peer <name> ...
-#
-# Or edit this file directly:
-#   edit bgp raw
-#
-# After configuration, run 'commit' to apply changes.
-#
-# Documentation: https://floofos.io/docs/
+asn: 65000
+router-id: 127.0.0.1
+
+kernel:
+  learn: true
